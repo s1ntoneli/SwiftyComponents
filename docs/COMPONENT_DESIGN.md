@@ -126,3 +126,35 @@ WaveformView(audioURL: url)
   - `WaveformView(samples:style:mirror:progress:tint:fillGradient:progressColor:progressLineWidth:)`
   - `WaveformAnalyzer.sampleAmplitudes(fileURL|asset|track, timeRange, samples, mode: .rms|.peak, channel: .mix|.left|.right)`
   - `WaveformDownsampler.downsampleMagnitudes(_:into:mode:)`
+
+### 录制与时间线（Streaming + LOD）
+- 流式聚合（录制）
+  - `WaveformStreamConfig { sampleRate, channel, mode, frameDuration, binsPerFrame, retention }`
+  - `WaveformStreamAggregator`
+    - `append(_ buffer: AVAudioPCMBuffer, at: CMTime)`：喂入实时 PCM（Float32）
+    - `popReadyFrames() -> [FrameWaveform]`：吐出并清空已完成帧
+    - `peekReadyFrames() -> [FrameWaveform]`：查看已完成帧（不清空）
+    - `snapshotAll() -> [FrameWaveform]`：查看保留窗口内的帧（ready + retained）
+    - `flush() -> [FrameWaveform]`：收尾吐出不足一帧样本
+    - `onFrames: ([FrameWaveform]) -> Void`：新帧回调（可选）
+  - `RetentionPolicy`：`.none | .windowSeconds(Double) | .windowFrames(Int) | .allInMemory`
+  - 内存估算：约 `fps × binsPerFrame × 4B` 每秒；RMS+Peak 或双通道按倍数放大。建议“保留窗口 + 持久化”。
+- LOD（剪辑）
+  - 未来补充 `WaveformLODBuilder/Store/Archive` 接口以支持缩放与快速查询。
+
+示例（录制侧骨架）
+```swift
+let cfg = WaveformStreamConfig(
+  sampleRate: 48000,
+  channel: .mix,
+  mode: .rms,
+  frameDuration: CMTime(value: 1, timescale: 60),
+  binsPerFrame: 128,
+  retention: .windowSeconds(15)
+)
+let aggr = WaveformStreamAggregator(config: cfg)
+aggr.onFrames = { frames in /* persist or preview */ }
+// in audio callback
+aggr.append(buffer, at: bufferPTS)
+let frames = aggr.popReadyFrames()
+```
