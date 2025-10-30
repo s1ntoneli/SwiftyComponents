@@ -36,6 +36,7 @@ struct WaveformDemoView: View {
     @State private var gradientBottom: Color = Color(red: 0.2, green: 0.5, blue: 1.0)
     @State private var progressColor: Color = .secondary
     @State private var progressWidth: Double = 1
+    @State private var docsExpanded: Bool = false
 
     struct AudioOption: Identifiable, Hashable {
         let id: String // name.ext
@@ -152,12 +153,12 @@ struct WaveformDemoView: View {
 // MARK: - Docs helpers
 extension WaveformDemoView {
     private func loadDocs() -> String? {
-        if let u = Bundle.main.url(forResource: "Waveform", withExtension: "md", subdirectory: "Docs"),
-           let data = try? Data(contentsOf: u),
-           let s = String(data: data, encoding: .utf8) {
-            return s
+        let url = Bundle.main.url(forResource: "Waveform", withExtension: "md", subdirectory: "Docs")
+            ?? Bundle.main.url(forResource: "Waveform", withExtension: "md")
+        guard let u = url, let data = try? Data(contentsOf: u), let s = String(data: data, encoding: .utf8) else {
+            return nil
         }
-        return nil
+        return s
     }
 
     private func copyIntegrationSnippet() {
@@ -190,22 +191,6 @@ extension WaveformDemoView {
 extension WaveformDemoView {
     @ViewBuilder private var inspectorContent: some View {
         Form {
-            Section(header: Text("文档")) {
-                Button("复制接入示例") { copyIntegrationSnippet() }
-                if let md = loadDocs() {
-                    ScrollView {
-                        Text(md)
-                            .font(.system(.callout, design: .monospaced))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .frame(minHeight: 160)
-                } else {
-                    Text("未找到 Docs/Waveform.md")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
             Section(header: Text("数据")) {
                 Picker("音频", selection: Binding(
                     get: { selection?.id ?? defaultInitialOption().id },
@@ -249,6 +234,32 @@ extension WaveformDemoView {
                 }
                 ColorPicker("进度线颜色", selection: $progressColor)
                 Stepper("进度线宽: \(String(format: "%.1f", progressWidth))", value: $progressWidth, in: 0.5...6, step: 0.5)
+            }
+            Section {
+                DisclosureGroup(isExpanded: $docsExpanded) {
+                    Button("复制接入示例") { copyIntegrationSnippet() }
+                    if let md = loadDocs() {
+                        ScrollView {
+                            if let attr = try? AttributedString(markdown: md) {
+                                Text(attr)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            } else {
+                                Text(md)
+                                    .font(.system(.callout, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .frame(minHeight: 160)
+                    } else {
+                        Text("未找到 Docs/Waveform.md（已回退展示）")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } label: {
+                    Text("示例与文档")
+                }
             }
         }
         .padding()
