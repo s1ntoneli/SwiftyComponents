@@ -60,3 +60,69 @@ WaveformView(audioURL: url)
     .waveformStyle(.bars)
     .tint(.blue)
 ```
+
+---
+
+## 实施规范摘要（落地参考）
+
+### 仓库结构与放置
+- 包目标 `SwiftyComponents`（iOS 15+ / macOS 12+）
+  - `Sources/SwiftyComponents/Components/` 组件主体
+  - `Sources/SwiftyComponents/Styles/` 样式与配置
+  - `Sources/SwiftyComponents/Foundations/` 基础能力（如音频解析）
+  - `Sources/SwiftyComponents/Utilities/` 纯函数/工具
+  - `Sources/SwiftyComponents/Extensions/` 轻量扩展
+- 示例 App
+  - `Examples/SwiftyComponentsExamples/SwiftyComponentsExamples/Scenes/` 页面（目录/演示/检查器）
+  - `.../Resources/Audio/` 示例音频，`.../Resources/Docs/` 示例文档
+- Agent 指南位置（Codex）
+  - `Packages/SwiftyComponents/AGENTS.md`（覆盖本包与其子目录，包括 Examples/Tests）
+  - 若需全工程生效，可在主仓库根再放置一份“顶层 AGENTS.md”做统一说明（可引用本文件）。
+
+### 示例 App 页面结构
+- 目录页 `CatalogView`：分组/搜索/导航，支持深链 `-demo <id> -variant <id>`
+- 演示页 `DemoPage`：单组件 Demo，变体切换
+- 测试支架 `DemoHarness`：主题/布局方向/动效控制，提供稳定标识符
+- 启动参数工具 `UITestGate`：`UI_TEST`、`-demo`、`-variant`
+- 检查器（Inspector）：集中“数据/显示/样式/外观/示例与文档”，支持 Markdown 渲染与复制代码片段
+
+### 资源策略
+- 示例资源统一放 `Examples/.../Resources/`，按类型分子目录（`Audio/`、`Docs/`）。
+- 代码访问路径优先子目录，不存在时回退根目录。
+- 新资源需勾选 App 目标（Target Membership）。
+
+### 测试策略
+- 单元测试（包层）：纯函数、样式映射、状态机，使用 Swift Testing。
+- UI 测试（示例层）：通过 `-demo/-variant UI_TEST` 直达页面；断言稳定标识符；必要时减少动效以稳定快照。
+- 快照测试（可选）：固定尺寸/主题/字体；可引入 SnapshotTesting。
+
+### 常用命令
+- 包：`swift build -v`、`swift test -v`
+- 示例（含 UI 测试）：
+  - `xcodebuild -project Examples/SwiftyComponentsExamples/SwiftyComponentsExamples.xcodeproj -scheme SwiftyComponentsExamples -destination 'platform=iOS Simulator,name=iPhone 16' test`
+
+### 新增组件流程（Checklist）
+1) 包层实现：在 `Components/` 新建组件；必要时在 `Styles/`/`Foundations/`/`Utilities/` 分层落地；仅暴露必要 `public`；补文档注释与最小示例。
+2) 示例页：在 `Scenes/` 新建 `ComponentNameDemoView`，接入检查器分组（数据/显示/样式/外观/示例与文档）。
+3) 注册：在 `ComponentRegistry.swift` 增加 `ComponentDemo` 与若干 `DemoVariant`（唯一 id）。
+4) 资源：放入 `Resources/`，并勾选目标。
+5) 测试：
+   - 包层：针对纯函数/映射逻辑加单测。
+   - 示例层：用 `-demo <id> -variant <id> UI_TEST` 直达并断言元素。
+
+### 命名与文案（示例）
+- 显示模式：双极（Bipolar）/ 单极（Unipolar）
+- 平滑曲线：Catmull‑Rom 平滑
+- 样式命名：名词 + `Style`；配置命名：`Configuration`
+
+---
+
+## Waveform 组件（参考实现要点）
+- 分层：Loader/Decoder → Analyzer（RMS/Peak） → Downsampler（bins） → Renderer（Canvas）。
+- 样式：Bars / Outline / Filled（支持 `smooth`）
+- 显示：双极（mirror=true）/ 单极（mirror=false，底部基线）
+- 外观：Tint、Filled 渐变、进度线颜色/线宽
+- 主要接口：
+  - `WaveformView(samples:style:mirror:progress:tint:fillGradient:progressColor:progressLineWidth:)`
+  - `WaveformAnalyzer.sampleAmplitudes(fileURL|asset|track, timeRange, samples, mode: .rms|.peak, channel: .mix|.left|.right)`
+  - `WaveformDownsampler.downsampleMagnitudes(_:into:mode:)`
