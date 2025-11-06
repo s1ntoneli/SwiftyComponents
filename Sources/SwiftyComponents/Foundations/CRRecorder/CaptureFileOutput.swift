@@ -52,6 +52,7 @@ class SingleCaptureFileOutput: CaptureFileOutput {
     let audioMode: AudioRecordingMode
     
     var sessionStarted = false
+    private var pendingStartOnFirstPTS = false
     var firstSampleTime: CMTime = .zero
     var lastSampleBuffer: CMSampleBuffer?
     
@@ -68,7 +69,7 @@ class SingleCaptureFileOutput: CaptureFileOutput {
     private var keepaliveTimer: DispatchSourceTimer? = nil
     private var lastAppendUptime: TimeInterval = 0
     private let keepaliveIntervalSeconds: TimeInterval = 1.0 // emit a dup frame if idle > 1s
-    private let keepaliveUseSyntheticTest: Bool = true // 测试：心跳帧使用随机纯色，确保非重复
+    private let keepaliveUseSyntheticTest: Bool = false // 测试：心跳帧使用随机纯色，确保非重复
     private let syntheticAllVideoFramesForTest: Bool = false // 测试：所有正常视频帧也替换为随机纯色
     private var fragmentIntervalSeconds: Double = 10.0
     private var pendingFragmentIntervalSeconds: Double? = nil
@@ -93,17 +94,18 @@ class SingleCaptureFileOutput: CaptureFileOutput {
         var videoURL = URL(fileURLWithPath: baseFileName)
         if videoURL.pathExtension.isEmpty {
             // 与 fileType 一致，默认 mov 容器
-            videoURL.appendPathExtension("mov")
+            videoURL.appendPathExtension("mp4")
         }
         var audioURL = URL(fileURLWithPath: baseFileName)
         audioURL.deletePathExtension()
         audioURL = audioURL.appendingPathExtension("m4a") // 独立音频始终用 m4a
         
         // 创建视频 AssetWriter
-        let videoAssetWriter = try AVAssetWriter(url: videoURL, fileType: .mov)
+        let videoAssetWriter = try AVAssetWriter(contentType: .mpeg4Movie)
+//        let videoAssetWriter = try AVAssetWriter(outputURL: videoURL, fileType: .mp4)
         // 在 startWriting 之前设置 fragment interval（运行时禁止修改）
         let initialFrag = CMTime(seconds: RecorderDiagnostics.shared.fragmentIntervalSeconds, preferredTimescale: 600)
-        videoAssetWriter.movieFragmentInterval = initialFrag
+//        videoAssetWriter.movieFragmentInterval = initialFrag
         // Publish file URL for diagnostics
         RecorderDiagnostics.shared.setOutputFileURL(videoURL)
         
@@ -230,7 +232,20 @@ class SingleCaptureFileOutput: CaptureFileOutput {
     }
     
     func saveFrame(for sampleBuffer: CMSampleBuffer) {
-        writerQueue.async {
+//        writerQueue.async {
+            // Start writer session at the first frame's PTS if requested and not yet started
+            if pendingStartOnFirstPTS && !sessionStarted {
+                let pts = sampleBuffer.presentationTimeStamp
+                firstSampleTime = pts
+                videoAssetWriter.startSession(atSourceTime: pts)
+                if let audioWriter = audioAssetWriter {
+                    // Audio stream we retime relative to firstSampleTime -> start audio at .zero
+                    audioWriter.startSession(atSourceTime: .zero)
+                }
+                sessionStarted = true
+                RecorderDiagnostics.shared.onWriterStarted()
+                RecorderDiagnostics.shared.recordEvent("Writer session started")
+            }
             let ready = self.videoInput.isReadyForMoreMediaData
             let vstatus = self.videoAssetWriter.status
             RecorderDiagnostics.shared.beforeAppendVideo(ready: ready, status: vstatus)
@@ -245,6 +260,22 @@ class SingleCaptureFileOutput: CaptureFileOutput {
                 RecorderDiagnostics.shared.onWriterVideoFailed()
                 if let err = underlyingError { RecorderDiagnostics.shared.recordError(err) }
             } else {
+                if ready && vstatus == .writing {
+                   if self.videoInput.append(sampleBuffer) {
+                       RecorderDiagnostics.shared.onAppendedVideo()
+                       self.lastAppendUptime = ProcessInfo.processInfo.systemUptime
+                       self.lastSampleBuffer = sampleBuffer
+                   }
+                        // enqueue and drain via requestMediaDataWhenReady
+//                        if self.pendingVideo.count >= self.maxPendingVideo { self.pendingVideo.removeFirst(self.pendingVideo.count - self.maxPendingVideo + 1) }
+//                        self.pendingVideo.append(sampleBuffer)
+//                        // 更新最近样本引用，便于 keepalive 基于同尺寸生成
+//                        self.lastSampleBuffer = sampleBuffer
+//                        self.drainVideoQueue()
+               }
+                if true {
+                    return
+                }
                 // Retiming
                 if self.firstSampleTime == .zero {
                     self.firstSampleTime = sampleBuffer.presentationTimeStamp
@@ -283,24 +314,16 @@ class SingleCaptureFileOutput: CaptureFileOutput {
                     RecorderDiagnostics.shared.logFlow("drop video: ready=\(ready) writer=\(vstatus.rawValue)")
                 }
             }
-        }
+//        }
     }
 
     
     
     func startSession() {
-        // Start the AVAssetWriter session at source time .zero, sample buffers will need to be re-timed
-        videoAssetWriter.startSession(atSourceTime: .zero)
-        if let audioWriter = audioAssetWriter {
-            audioWriter.startSession(atSourceTime: .zero)
-        }
-        sessionStarted = true
-        RecorderDiagnostics.shared.onWriterStarted()
-        RecorderDiagnostics.shared.recordEvent("Writer session started")
-        startKeepalive()
-        if usePullMode {
-//            startRequestCallbacks()
-        }
+        // Defer starting the session until the first video frame arrives, and use its PTS.
+        pendingStartOnFirstPTS = true
+        // Keepalive/request callbacks remain managed by drain methods.
+//        startRequestCallbacks()
     }
     
     func stopSession() async throws {
@@ -331,7 +354,9 @@ class SingleCaptureFileOutput: CaptureFileOutput {
             if let audioInput = audioInput {
                 audioInput.markAsFinished()
             }
-            await videoAssetWriter.finishWriting()
+            await videoAssetWriter.finishWriting {
+                print("CaptureFileOutput afterFinishWriting", self.videoAssetWriter.outputURL.path())
+            }
             print("CaptureFileOutput afterFinishWriting", videoAssetWriter.status.rawValue)
             if let audioWriter = audioAssetWriter {
                 await audioWriter.finishWriting()
@@ -467,7 +492,7 @@ class SingleCaptureFileOutput: CaptureFileOutput {
     private func drainVideoQueue() {
         guard sessionStarted else { return }
         RecorderDiagnostics.shared.updatePendingCounts(video: pendingVideo.count, videoCap: maxPendingVideo, audio: pendingAudio.count, audioCap: maxPendingAudio)
-        while videoInput.isReadyForMoreMediaData, !pendingVideo.isEmpty {
+        while videoInput.isReadyForMoreMediaData, !pendingVideo.isEmpty, pendingStartOnFirstPTS {
             let sb = pendingVideo.removeFirst()
             let ok = videoInput.append(sb)
             if ok {

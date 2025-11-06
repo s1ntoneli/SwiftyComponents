@@ -102,6 +102,7 @@ class CaptureEngine: NSObject, @unchecked Sendable, @preconcurrency SCStreamDele
     /// - Tag: StartCapture
     func startCaptureDirectly(configuration: SCStreamConfiguration, filter: SCContentFilter) throws {
         // The stream output object. Avoid reassigning it to a new object every time startCapture is called.
+//        let streamOutput = CaptureEngineStreamOutput(continuation: continuation, captureFileOutput: nil, firstFrameTimestampHandler: firstFrameTimestampHandler)
         let streamOutput = CaptureEngineStreamOutput(continuation: continuation, captureFileOutput: captureFileOutput, firstFrameTimestampHandler: firstFrameTimestampHandler)
         self.streamOutput = streamOutput
         streamOutput.capturedFrameHandler = { _ in }
@@ -141,7 +142,7 @@ class CaptureEngine: NSObject, @unchecked Sendable, @preconcurrency SCStreamDele
         
         // Add a stream output to capture screen content.
         try stream?.addStreamOutput(streamOutput, type: .screen, sampleHandlerQueue: videoSampleBufferQueue)
-        try stream?.addStreamOutput(streamOutput, type: .audio, sampleHandlerQueue: audioSampleBufferQueue)
+//        try stream?.addStreamOutput(streamOutput, type: .audio, sampleHandlerQueue: audioSampleBufferQueue)
         stream?.startCapture()
         self.captureFileOutput?.startSession()
     }

@@ -111,15 +111,19 @@ class CRCameraRecording {
         endTime = CFAbsoluteTimeGetCurrent()
         let url = try await backend.stop()
         if let s = session { AVCaptureSessionHelper.stopRecordingStep2Close(avSession: s) }
-        if let url {
+        if var url {
+            let dur = max(0, endTime - startTime)
+            url = renameFileAddingDuration(url: url, seconds: dur)
             return [CRRecorder.BundleInfo.FileAsset(filename: url.lastPathComponent, tyle: .webcam, recordingStartTimestamp: startTime, recordingEndTimestamp: endTime)]
         }
         return []
     }
 
     func packLastResult() -> [CRRecorder.BundleInfo.FileAsset] {
-        if let fileURL = startURL {
-            let asset = CRRecorder.BundleInfo.FileAsset(filename: fileURL.lastPathComponent, tyle: .webcam, recordingStartTimestamp: startTime, recordingEndTimestamp: CFAbsoluteTimeGetCurrent())
+        if var fileURL = startURL {
+            let end = CFAbsoluteTimeGetCurrent()
+            fileURL = renameFileAddingDuration(url: fileURL, seconds: max(0, end - startTime))
+            let asset = CRRecorder.BundleInfo.FileAsset(filename: fileURL.lastPathComponent, tyle: .webcam, recordingStartTimestamp: startTime, recordingEndTimestamp: end)
             return [asset]
         }
         return []
@@ -191,15 +195,19 @@ class CRAppleDeviceRecording {
         endTime = CFAbsoluteTimeGetCurrent()
         let url = try await backend.stop()
         if let s = session { AVCaptureSessionHelper.stopRecordingStep2Close(avSession: s) }
-        if let url {
+        if var url {
+            let dur = max(0, endTime - startTime)
+            url = renameFileAddingDuration(url: url, seconds: dur)
             return [CRRecorder.BundleInfo.FileAsset(filename: url.lastPathComponent, tyle: .appleDevice, recordingStartTimestamp: startTime, recordingEndTimestamp: endTime)]
         }
         return []
     }
 
     func packLastResult() -> [CRRecorder.BundleInfo.FileAsset] {
-        if let fileURL = startURL {
-            let asset = CRRecorder.BundleInfo.FileAsset(filename: fileURL.lastPathComponent, tyle: .appleDevice, recordingStartTimestamp: startTime, recordingEndTimestamp: CFAbsoluteTimeGetCurrent())
+        if var fileURL = startURL {
+            let end = CFAbsoluteTimeGetCurrent()
+            fileURL = renameFileAddingDuration(url: fileURL, seconds: max(0, end - startTime))
+            let asset = CRRecorder.BundleInfo.FileAsset(filename: fileURL.lastPathComponent, tyle: .appleDevice, recordingStartTimestamp: startTime, recordingEndTimestamp: end)
             return [asset]
         }
         return []
@@ -277,15 +285,19 @@ class CRMicrophoneRecording {
         endTime = CFAbsoluteTimeGetCurrent()
         let url = try await backend.stop()
         if let s = session { AVCaptureSessionHelper.stopRecordingStep2Close(avSession: s) }
-        if let url {
+        if var url {
+            let dur = max(0, endTime - startTime)
+            url = renameFileAddingDuration(url: url, seconds: dur)
             return [CRRecorder.BundleInfo.FileAsset(filename: url.lastPathComponent, tyle: .audio, recordingStartTimestamp: startTime, recordingEndTimestamp: endTime)]
         }
         return []
     }
 
     func packLastResult() -> [CRRecorder.BundleInfo.FileAsset] {
-        if let fileURL = startURL {
-            let asset = CRRecorder.BundleInfo.FileAsset(filename: fileURL.lastPathComponent, tyle: .audio, recordingStartTimestamp: startTime, recordingEndTimestamp: CFAbsoluteTimeGetCurrent())
+        if var fileURL = startURL {
+            let end = CFAbsoluteTimeGetCurrent()
+            fileURL = renameFileAddingDuration(url: fileURL, seconds: max(0, end - startTime))
+            let asset = CRRecorder.BundleInfo.FileAsset(filename: fileURL.lastPathComponent, tyle: .audio, recordingStartTimestamp: startTime, recordingEndTimestamp: end)
             return [asset]
         }
         return []

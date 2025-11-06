@@ -342,6 +342,7 @@ public class CRRecorder: @unchecked Sendable {
         let bundleInfo = BundleInfo(duration: 0, files: fileAssets, version: 0)
         let result = Result(bundleURL: outputDirectory, bundleInfo: bundleInfo)
         print("[CRRecorder] 所有录制任务完成，总文件数量: \(fileAssets.count)")
+        writeBundleManifestIfPossible(bundleInfo)
         return result
     }
     
@@ -414,7 +415,7 @@ public class CRRecorder: @unchecked Sendable {
         public var bundleInfo: BundleInfo
     }
     
-    public struct BundleInfo: Sendable {
+    public struct BundleInfo: Codable, Sendable {
         public var duration: TimeInterval
         public var files: [FileAsset]
         public var version: Int
@@ -457,6 +458,25 @@ public class CRRecorder: @unchecked Sendable {
             case systemAudio
             case topWindow
             case webcam
+        }
+    }
+}
+
+// MARK: - Persist manifest
+extension CRRecorder {
+    fileprivate func writeBundleManifestIfPossible(_ info: BundleInfo) {
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .withoutEscapingSlashes]
+            let data = try encoder.encode(info)
+            if !FileManager.default.fileExists(atPath: outputDirectory.path) {
+                try FileManager.default.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+            }
+            let url = outputDirectory.appendingPathComponent("bundle.json")
+            try data.write(to: url, options: .atomic)
+            print("[CRRecorder] 已写入清单: \(url.path)")
+        } catch {
+            print("[CRRecorder] 写入清单失败: \(error.localizedDescription)")
         }
     }
 }

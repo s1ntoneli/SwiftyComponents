@@ -89,7 +89,7 @@ public struct RecorderDiagnosticsView: View {
             statusDot(on: diag.writerActive, label: diag.writerActive ? "Writer Active" : "Writer Stopped")
             Spacer()
             if let t = diag.lastFrameWallTime {
-                Text("Last frame: \(relativeDate(t))")
+                Text("Last frame: \(absoluteTime(t))")
                     .foregroundStyle(.secondary)
             }
         }
@@ -167,7 +167,7 @@ public struct RecorderDiagnosticsView: View {
                     ForEach(diag.errors.suffix(50)) { e in
                         VStack(alignment: .leading, spacing: 4) {
                             HStack {
-                                Text(relativeDate(e.time)).frame(width: 120, alignment: .leading)
+                                Text(absoluteTime(e.time)).frame(width: 160, alignment: .leading)
                                 Text("\(e.domain) [\(e.code)] — \(e.message)")
                             }
                             Group {
@@ -190,7 +190,7 @@ public struct RecorderDiagnosticsView: View {
                 LazyVStack(alignment: .leading, spacing: 8) {
                     ForEach(diag.events.suffix(100)) { ev in
                         HStack {
-                            Text(relativeDate(ev.time)).frame(width: 120, alignment: .leading)
+                            Text(absoluteTime(ev.time)).frame(width: 160, alignment: .leading)
                             Text(ev.message)
                         }
                         .padding(.vertical, 2)
@@ -208,7 +208,7 @@ public struct RecorderDiagnosticsView: View {
                 LazyVStack(alignment: .leading, spacing: 6) {
                     ForEach(diag.flowLogs.suffix(200)) { l in
                         HStack(alignment: .top) {
-                            Text(relativeDate(l.time)).frame(width: 120, alignment: .leading)
+                            Text(absoluteTime(l.time)).frame(width: 160, alignment: .leading)
                             Text(l.message).textSelection(.enabled)
                         }
                         .font(.caption)
@@ -247,10 +247,10 @@ public struct RecorderDiagnosticsView: View {
         return String(format: "%.2f GB", mb / 1024)
     }
 
-    private func relativeDate(_ d: Date) -> String {
-        let df = RelativeDateTimeFormatter()
-        df.unitsStyle = .short
-        return df.localizedString(for: d, relativeTo: Date())
+    private func absoluteTime(_ d: Date) -> String {
+        // e.g. 2025-11-03 11:58:07
+        struct Holder { static let df: DateFormatter = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm:ss"; return f }() }
+        return Holder.df.string(from: d)
     }
 
     private func snapshotSummary(_ s: DiagnosticsSnapshot) -> String {

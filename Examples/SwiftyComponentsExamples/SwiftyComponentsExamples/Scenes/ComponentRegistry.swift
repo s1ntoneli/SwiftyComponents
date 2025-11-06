@@ -34,7 +34,24 @@ enum ComponentRegistry {
                 )
             ]
         )
-        return ComponentGroup(id: "media", title: "媒体 / Media", demos: [waveform])
+        let recorder = ComponentDemo(
+            id: "crrecorder",
+            title: "Screen Recorder",
+            summary: "屏幕录制（左上角 200×200）+ 诊断视图",
+            variants: [
+                DemoVariant(
+                    id: "control",
+                    title: "Control",
+                    makeView: { AnyView(CRRecorderDemoView()) }
+                ),
+                DemoVariant(
+                    id: "diagnostics",
+                    title: "Diagnostics",
+                    makeView: { AnyView(RecorderDiagnosticsView()) }
+                )
+            ]
+        )
+        return ComponentGroup(id: "media", title: "媒体 / Media", demos: [waveform, recorder])
     }()
 }
 
