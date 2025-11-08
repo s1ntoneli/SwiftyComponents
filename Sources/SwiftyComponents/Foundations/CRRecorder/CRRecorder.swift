@@ -16,6 +16,7 @@ public class CRRecorder: @unchecked Sendable {
     var captureSessions: [String: AVCaptureSession] = [:]
     var captureDelegates: [String: CaptureRecordingDelegate] = [:]
     var screenCaptureSessions: ScreenCaptureRecorder?
+    var screenOptions: ScreenRecorderOptions = .init()
     
     var appleDeviceCaptures: [String: CRAppleDeviceRecording] = [:]
     var cameraCaptures: [String: CRCameraRecording] = [:]
@@ -44,14 +45,14 @@ public class CRRecorder: @unchecked Sendable {
             switch scheme {
             case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename):
                 print("[CRRecorder] 准备屏幕录制 - 显示器ID: \(displayId), 文件名: \(filename), HDR: \(hdr), 系统音频: \(captureSystemAudio)")
-                screenCaptureSessions = ScreenCaptureRecorder(filePath: outputDirectory.appendingPathComponent(filename).appendingPathExtension("mov").path(percentEncoded: false))
+                screenCaptureSessions = ScreenCaptureRecorder(filePath: outputDirectory.appendingPathComponent(filename).appendingPathExtension("mov").path(percentEncoded: false), options: screenOptions)
                 screenCaptureSessions?.errorHandler = {
                     NSLog("🔥 [CR_RECORDER_ERROR] CRRecorder 接收到屏幕录制错误: %@", $0.localizedDescription)
                     self.onInterupt($0)
                 }
             case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
                 print("[CRRecorder] 准备窗口录制 - 显示器ID: \(displayId), 窗口ID: \(windowID), 文件名: \(filename)")
-                screenCaptureSessions = ScreenCaptureRecorder(filePath: outputDirectory.appendingPathComponent(filename).appendingPathExtension("mov").path(percentEncoded: false))
+                screenCaptureSessions = ScreenCaptureRecorder(filePath: outputDirectory.appendingPathComponent(filename).appendingPathExtension("mov").path(percentEncoded: false), options: screenOptions)
                 screenCaptureSessions?.errorHandler = {
                     NSLog("🔥 [CR_RECORDER_ERROR] CRRecorder 接收到窗口录制错误: %@", $0.localizedDescription)
                     self.onInterupt($0)
@@ -178,7 +179,7 @@ public class CRRecorder: @unchecked Sendable {
     func startRecord(scheme: SchemeItem) async throws {
         switch scheme {
         case .display(displayID: let displayID, area: let area, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
-            try await screenCaptureSessions?.startScreenCapture(displayID: displayID, cropRect: area, hdr: hdr, showsCursor: false, includeAudio: captureSystemAudio)
+            try await screenCaptureSessions?.startScreenCapture(displayID: displayID, cropRect: area, hdr: hdr, showsCursor: screenOptions.showsCursor, includeAudio: captureSystemAudio)
         case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
             try await screenCaptureSessions?.startWindowCapture(windowID: windowID, displayID: displayId, hdr: hdr, includeAudio: captureSystemAudio)
         case .camera(cameraID: let cameraID, filename: let filename):
@@ -234,7 +235,7 @@ public class CRRecorder: @unchecked Sendable {
         switch scheme {
         case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename):
             print("[CRRecorder] 开始屏幕录制")
-            return try await screenCaptureSessions?.startScreenCapture(displayID: displayId, cropRect: area, hdr: hdr, showsCursor: false, includeAudio: captureSystemAudio) ?? []
+            return try await screenCaptureSessions?.startScreenCapture(displayID: displayId, cropRect: area, hdr: hdr, showsCursor: screenOptions.showsCursor, includeAudio: captureSystemAudio) ?? []
         case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
             print("[CRRecorder] 开始窗口录制")
             return try await screenCaptureSessions?.startWindowCapture(windowID: windowID, displayID: displayId, hdr: hdr, includeAudio: captureSystemAudio) ?? []

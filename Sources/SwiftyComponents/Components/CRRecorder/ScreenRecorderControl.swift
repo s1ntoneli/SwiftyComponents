@@ -6,6 +6,7 @@ import Combine
 import AppKit
 import CoreGraphics
 import AVFoundation
+@preconcurrency import ScreenCaptureKit
 
 /// A simple control to start/stop screen recording using CRRecorder.
 ///
@@ -47,6 +48,21 @@ public struct ScreenRecorderControl: View {
     @State private var contentFirstFrameAt: Date? = nil
     @State private var latestFileDuration: TimeInterval? = nil
     @State private var logs: [RecordingLogItem] = []
+    @State private var fileName: String = "capture"
+    enum Mode: String, CaseIterable { case display = "Display", window = "Window" }
+    @State private var mode: Mode = .display
+    @State private var windowIDText: String = ""
+    @State private var fps: Int = 60
+    @State private var showsCursor: Bool = false
+    @State private var useHEVC: Bool = false
+    @State private var hdr: Bool = false
+    @State private var queueDepthText: String = ""
+    @State private var targetBitrateText: String = ""
+    // Content lists
+    @State private var displays: [SCDisplay] = []
+    @State private var windows: [SCWindow] = []
+    @State private var selectedDisplayID: Int? = nil
+    @State private var selectedWindowID: Int? = nil
 
     // Keep a reference while recording
     @State private var recorder: CRRecorder? = nil
@@ -89,6 +105,56 @@ public struct ScreenRecorderControl: View {
                     .accessibilityIdentifier("CRRecorder.ChooseFolder")
                 Button("Open Folder", action: openFolder)
                     .accessibilityIdentifier("CRRecorder.OpenFolder")
+            }
+
+            // Naming + mode
+            HStack(spacing: 8) {
+                TextField("File name (no extension)", text: $fileName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(minWidth: 180)
+                Picker("Mode", selection: $mode) {
+                    ForEach(Mode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented)
+                Button("Refresh") { Task { await reloadContent() } }
+                    .buttonStyle(.bordered)
+            }
+
+            // Pickers for display/window
+            if mode == .display {
+                HStack(spacing: 8) {
+                    Text("Display:")
+                    Picker("Display", selection: Binding(get: { selectedDisplayID ?? displays.first.map { Int($0.displayID) } }, set: { selectedDisplayID = $0 })) {
+                        ForEach(displays, id: \.displayID) { d in
+                            Text("Display #\(d.displayID)").tag(Int(d.displayID) as Int?)
+                        }
+                    }
+                    .frame(width: 240)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    Text("Window:")
+                    Picker("Window", selection: Binding(get: { selectedWindowID }, set: { selectedWindowID = $0 })) {
+                        ForEach(windows, id: \.windowID) { w in
+                            let title = (w.title?.isEmpty == false ? w.title! : "Untitled")
+                            Text(title).tag(Int(w.windowID) as Int?)
+                        }
+                    }
+                    .frame(width: 360)
+                }
+            }
+
+            // Options
+            HStack(spacing: 12) {
+                Stepper("FPS: \(fps)", value: $fps, in: 1...240)
+                Toggle("Cursor", isOn: $showsCursor)
+                Toggle("HEVC", isOn: $useHEVC)
+                Toggle("HDR", isOn: $hdr)
+                TextField("QueueDepth", text: $queueDepthText)
+                    .frame(width: 100)
+                    .textFieldStyle(.roundedBorder)
+                TextField("Bitrate(bps)", text: $targetBitrateText)
+                    .frame(width: 140)
+                    .textFieldStyle(.roundedBorder)
             }
 
             // Start / Stop controls
@@ -197,6 +263,7 @@ public struct ScreenRecorderControl: View {
             RecorderDiagnosticsView()
         }
         .onAppear { loadLogs() }
+        .task { await reloadContent() }
         .onReceive(diag.$lastFrameWallTime) { t in
             if isRecording, contentFirstFrameAt == nil, let t { contentFirstFrameAt = t }
         }
@@ -213,16 +280,28 @@ public struct ScreenRecorderControl: View {
         defer { isBusy = false }
         errorMessage = nil
 
-        let fileBase = Self.timestampedFilenamePrefix("screen")
-        let scheme: CRRecorder.SchemeItem = .display(
-            displayID: configuration.displayID,
-            area: configuration.cropRect,
-            hdr: false,
-            captureSystemAudio: configuration.captureSystemAudio,
-            filename: fileBase
-        )
+        // Build scheme
+        let scheme: CRRecorder.SchemeItem
+        if mode == .window {
+            guard let widInt = selectedWindowID ?? Int(windowIDText) else { errorMessage = "Please select a window"; return }
+            scheme = .window(displayId: 0, windowID: CGWindowID(widInt), hdr: hdr, captureSystemAudio: configuration.captureSystemAudio, filename: fileName)
+        } else {
+            let dispID: CGDirectDisplayID = selectedDisplayID.map { CGDirectDisplayID($0) } ?? configuration.displayID
+            scheme = .display(displayID: dispID, area: configuration.cropRect, hdr: hdr, captureSystemAudio: configuration.captureSystemAudio, filename: fileName)
+        }
 
         let rec = CRRecorder([scheme], outputDirectory: outputDirectory)
+        // Pass options
+        var opts = ScreenRecorderOptions(
+            fps: fps,
+            queueDepth: Int(queueDepthText),
+            targetBitRate: Int(targetBitrateText),
+            includeAudio: configuration.captureSystemAudio,
+            showsCursor: showsCursor,
+            hdr: hdr,
+            useHEVC: useHEVC
+        )
+        rec.screenOptions = opts
         rec.onInterupt = { err in
             DispatchQueue.main.async { self.handleInterruption(err) }
         }
@@ -322,6 +401,11 @@ public struct ScreenRecorderControl: View {
             } catch {
                 self.errorMessage = error.localizedDescription
                 self.isRecording = false
+                // Ensure a log entry exists even if file list is empty
+                if self.lastSavedFiles.isEmpty {
+                    self.lastSavedFiles = [self.fileName + ".mov"]
+                    self.appendAndPersistLog()
+                }
             }
             self.recorder = nil
             self.recordStartAt = nil
@@ -376,6 +460,26 @@ public struct ScreenRecorderControl: View {
         let item = RecordingLogItem(filePath: path, startedAt: started, endedAt: ended, clickDurationSeconds: click, videoDurationSeconds: video, note: "")
         logs.append(item)
         saveLogs()
+    }
+
+    // MARK: - Content loading
+    private func reloadContent() async {
+        await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { content, error in
+                let newDisplays = content?.displays ?? []
+                let newWindows = content?.windows ?? []
+                DispatchQueue.main.async {
+                    if error == nil {
+                        self.displays = newDisplays
+                        self.windows = newWindows.filter { ($0.title ?? "").isEmpty == false }
+                        if selectedDisplayID == nil { selectedDisplayID = displays.first.map { Int($0.displayID) } }
+                    } else {
+                        self.errorMessage = error?.localizedDescription ?? "Failed to fetch shareable content"
+                    }
+                    cont.resume()
+                }
+            }
+        }
     }
 }
 
