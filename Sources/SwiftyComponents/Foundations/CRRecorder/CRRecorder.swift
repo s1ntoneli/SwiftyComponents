@@ -189,7 +189,7 @@ public class CRRecorder: @unchecked Sendable {
             try await screenCaptureSessions?.startWindowCapture(windowID: windowID, displayID: displayId, hdr: hdr, includeAudio: captureSystemAudio)
         case .camera(cameraID: let cameraID, filename: let filename):
             if let cameraCapture = cameraCaptures[cameraID] {
-                let fileURL = outputDirectory.appendingPathComponent(filename, conformingTo: .mpeg4Movie)
+                let fileURL = outputDirectory.appendingPathComponent(filename, conformingTo: .movie).appendingPathExtension("mov")
                 try await cameraCapture.start(fileURL: fileURL)
             }
         case .microphone(microphoneID: let microphoneID, filename: let filename):
