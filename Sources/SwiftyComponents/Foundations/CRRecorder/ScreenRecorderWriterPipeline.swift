@@ -2,7 +2,9 @@ import Foundation
 import AVFoundation
 import ScreenCaptureKit
 
-struct WriterPipeline {
+// Class semantics avoid cross-queue value-copy races when accessed from
+// separate audio/video queues and during finalize.
+final class WriterPipeline {
     let writer: AVAssetWriter
     let videoInput: AVAssetWriterInput
     let audioInput: AVAssetWriterInput?
@@ -12,6 +14,13 @@ struct WriterPipeline {
     private var lastVideoPTS: CMTime?
     // 防重入/并发 finish 保护
     private var isFinishing: Bool = false
+
+    init(writer: AVAssetWriter, videoInput: AVAssetWriterInput, audioInput: AVAssetWriterInput?, didStartSession: Bool) {
+        self.writer = writer
+        self.videoInput = videoInput
+        self.audioInput = audioInput
+        self.didStartSession = didStartSession
+    }
 
     static func create(url: URL, configuration: SCStreamConfiguration, options: ScreenRecorderOptions) throws -> WriterPipeline {
         let writer = try AVAssetWriter(url: url, fileType: .mov)
@@ -36,14 +45,14 @@ struct WriterPipeline {
         return WriterPipeline(writer: writer, videoInput: vInput, audioInput: aInput, didStartSession: false)
     }
 
-    mutating func startSession(at pts: CMTime) {
+    func startSession(at pts: CMTime) {
         guard !didStartSession else { return }
         writer.startSession(atSourceTime: pts)
         didStartSession = true
         lastVideoPTS = pts
     }
 
-    mutating func appendVideo(_ sample: CMSampleBuffer) {
+    func appendVideo(_ sample: CMSampleBuffer) {
         // 若正在 finish 或尚未 startSession（例如“首帧前停止” race），直接丢弃，避免 AVAssetWriter 崩溃
         if isFinishing || !didStartSession { return }
         let ready = videoInput.isReadyForMoreMediaData
@@ -73,7 +82,7 @@ struct WriterPipeline {
         }
     }
 
-    mutating func finish() async throws {
+    func finish() async throws {
         // 防止重入：并发或重复调用 finish()
         if isFinishing { return }
         isFinishing = true

@@ -117,14 +117,13 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
             guard let self else { return }
             // finalize 后丢弃晚到样本
             guard self.allowAppend else { return }
-            if var writer = self.writer, !writer.didStartSession {
+            if let writer = self.writer, !writer.didStartSession {
                 // Use the first video sample's PTS as the recording start time (for A/V alignment)
                 let pts = sample.presentationTimeStamp
                 writer.startSession(at: pts)
                 self.firstFrameTimestamp = pts.seconds
                 RecorderDiagnostics.shared.onWriterStarted()
                 RecorderDiagnostics.shared.recordEvent("Writer session started")
-                self.writer = writer // write-back mutated struct
             }
             self.writer?.appendVideo(sample)
         }
@@ -146,8 +145,10 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         }
 
         let stream = SCStream(filter: filter, configuration: configuration, delegate: out)
-        try stream.addStreamOutput(out, type: .screen, sampleHandlerQueue: DispatchQueue(label: "com.swiftycomponents.screen.video"))
-        if options.includeAudio { try stream.addStreamOutput(out, type: .audio, sampleHandlerQueue: DispatchQueue(label: "com.swiftycomponents.screen.audio")) }
+        // 使用同一个串行队列处理音视频样本，降低跨队列并发带来的写入竞争
+        let sampleQueue = DispatchQueue(label: "com.swiftycomponents.screen.sample")
+        try stream.addStreamOutput(out, type: .screen, sampleHandlerQueue: sampleQueue)
+        if options.includeAudio { try stream.addStreamOutput(out, type: .audio, sampleHandlerQueue: sampleQueue) }
         RecorderDiagnostics.shared.onStartCapture(configuration: configuration)
         stream.startCapture()
         self.stream = stream
@@ -164,9 +165,8 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         if !skipStoppingStream, let stream { try? await stream.stopCapture() }
         self.stream = nil
         RecorderDiagnostics.shared.onStopCapture()
-        if var writer = self.writer {
+        if let writer = self.writer {
             try await writer.finish()
-            self.writer = writer
             RecorderDiagnostics.shared.onWriterStopped()
         }
     }
