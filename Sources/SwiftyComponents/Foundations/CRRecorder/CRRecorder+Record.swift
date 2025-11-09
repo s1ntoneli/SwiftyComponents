@@ -47,6 +47,8 @@ class CRCameraRecording {
     // 对外回调（供 CRRecorder 注入）
     var onError: (Error) -> Void = { _ in }
     var onComplete: (URL) -> Void = { _ in }
+    // 可配置参数（分辨率/编码器/码率范围）
+    var options: CameraRecordingOptions = .init()
 
     // 手动切换后端：如需回退为文件输出，将下行替换为 FileOutputCamBackend()
     private let backend: CameraBackend = AssetWriterCamBackend()
@@ -79,10 +81,17 @@ class CRCameraRecording {
         let input = try AVCaptureDeviceInput(device: device)
         let session = AVCaptureSession()
         session.beginConfiguration()
+        // 分辨率开关（默认为 720p，可置空维持设备原生分辨率）
+        if let preset = options.preset, session.canSetSessionPreset(preset) {
+            session.sessionPreset = preset
+        }
         guard session.canAddInput(input) else { throw RecordingError.cannotAddInput }
         session.addInput(input)
+        // 不强制降帧，保持设备默认或用户设置的高帧率，体积控制交由编码器码率完成。
         session.commitConfiguration()
 
+        // 传入编码与码率开关
+        backend.apply(options: options)
         try backend.configure(session: session, device: device, delegate: delegate, queue: DispatchQueue(label: "com.recorderkit.camera.video", qos: .userInitiated))
 
         session.startRunning()
@@ -140,6 +149,7 @@ class CRAppleDeviceRecording {
 
     // 复用相机后端（FileOutput 或 AssetWriter），默认 FileOutput
     private let backend: CameraBackend = AssetWriterCamBackend()
+    var options: CameraRecordingOptions = .init()
 
     init() {
         NSLog("📹 CRAppleDeviceRecording 初始化")
@@ -163,6 +173,7 @@ class CRAppleDeviceRecording {
         // QuickTime 的做法是同时选择 iPhone 作为视频源和麦克风源
         session.commitConfiguration()
 
+        backend.apply(options: options)
         try backend.configure(session: session, device: device, delegate: delegate, queue: DispatchQueue(label: "com.recorderkit.appledevice.video", qos: .userInitiated))
 
         session.startRunning()

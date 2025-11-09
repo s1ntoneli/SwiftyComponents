@@ -11,6 +11,7 @@ final class FileOutputCamBackend: CameraBackend {
 
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var fileURL: URL?
+    func apply(options: CameraRecordingOptions) { /* file-output backend uses system defaults */ }
 
     func configure(session: AVCaptureSession, device: AVCaptureDevice, delegate: CaptureRecordingDelegate, queue: DispatchQueue) throws {
         self.session = session

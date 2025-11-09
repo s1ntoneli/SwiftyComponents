@@ -8,6 +8,7 @@ final class AssetWriterCamBackend: CameraBackend {
     private weak var delegate: CaptureRecordingDelegate?
     private var videoDataOutput: AVCaptureVideoDataOutput?
     private var audioDataOutput: AVCaptureAudioDataOutput?
+    private weak var device: AVCaptureDevice?
 
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
@@ -16,10 +17,14 @@ final class AssetWriterCamBackend: CameraBackend {
     private var fileURL: URL?
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var acceptingSamples = true
+    private var options: CameraRecordingOptions = .init()
+
+    func apply(options: CameraRecordingOptions) { self.options = options }
 
     func configure(session: AVCaptureSession, device: AVCaptureDevice, delegate: CaptureRecordingDelegate, queue: DispatchQueue) throws {
         self.session = session
         self.delegate = delegate
+        self.device = device
 
         session.beginConfiguration()
         // 视频数据输出
@@ -88,16 +93,45 @@ final class AssetWriterCamBackend: CameraBackend {
                 width = CVPixelBufferGetWidth(img)
                 height = CVPixelBufferGetHeight(img)
             }
-            let compression: [String: Any] = [
-                AVVideoAverageBitRateKey: 6_000_000,
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
-            ]
-            let settings: [String: Any] = [
-                AVVideoCodecKey: AVVideoCodecType.h264,
-                AVVideoWidthKey: width,
-                AVVideoHeightKey: height,
-                AVVideoCompressionPropertiesKey: compression
-            ]
+            // 依据分辨率与帧率估算目标码率；默认 H.264，可按开关尝试 HEVC
+            let fps: Int = {
+                if let d = device {
+                    let min = d.activeVideoMinFrameDuration
+                    if min.value != 0 { return max(1, Int(round(Double(min.timescale) / Double(min.value)))) }
+                }
+                return 60
+            }()
+            func buildSettings(codec: AVVideoCodecType, bpp: Double) -> [String: Any] {
+                let computed = Int(Double(width * height * max(1, fps)) * bpp)
+                let targetBitrate = max(options.minBitrate, min(computed, options.maxBitrate))
+                var comp: [String: Any] = [
+                    AVVideoAverageBitRateKey: targetBitrate,
+                    AVVideoMaxKeyFrameIntervalDurationKey: 2,
+                    AVVideoExpectedSourceFrameRateKey: fps,
+                    AVVideoAllowFrameReorderingKey: true
+                ]
+                if codec == .h264 {
+                    comp[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel
+                    comp[AVVideoH264EntropyModeKey] = AVVideoH264EntropyModeCABAC
+                }
+                return [
+                    AVVideoCodecKey: codec,
+                    AVVideoWidthKey: width,
+                    AVVideoHeightKey: height,
+                    AVVideoCompressionPropertiesKey: comp
+                ]
+            }
+
+            // 优先选择开关指定的编码器；若 HEVC 不可用则回退 H.264
+            let tryHEVC = options.preferHEVC
+            let hevcSettings = buildSettings(codec: .hevc, bpp: options.bppHEVC)
+            let h264Settings = buildSettings(codec: .h264, bpp: options.bppH264)
+            let settings: [String: Any]
+            if tryHEVC, let writer, writer.canApply(outputSettings: hevcSettings, forMediaType: .video) {
+                settings = hevcSettings
+            } else {
+                settings = h264Settings
+            }
             let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
             vInput.expectsMediaDataInRealTime = true
             // 同步创建音频输入

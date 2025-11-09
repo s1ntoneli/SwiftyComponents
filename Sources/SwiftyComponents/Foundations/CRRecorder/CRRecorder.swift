@@ -32,6 +32,8 @@ public class CRRecorder: @unchecked Sendable {
     
     // Per-run microphone processing options (default disabled; mono channels=1)
     public var microphoneOptions: MicrophoneProcessingOptions = .init()
+    // Per-run camera options (resolution/codec/bitrate clamp)
+    public var cameraOptions: CameraRecordingOptions = .init()
 
     public init(_ schemes: [SchemeItem], outputDirectory: URL) {
         self.schemes = schemes
@@ -64,6 +66,7 @@ public class CRRecorder: @unchecked Sendable {
                 print("[CRRecorder] 准备摄像头录制 - 摄像头ID: \(cameraID), 文件名: \(filename)")
 //                prepareCameraSession(cameraID: cameraID, filename: filename)
                 let cameraRecording = CRCameraRecording()
+                cameraRecording.options = cameraOptions
                 cameraRecording.onError = { err in
                     NSLog("📹 [CR_RECORDER_CAMERA_ERROR] CRRecorder 接收到摄像头错误: %@", err.localizedDescription)
                     self.onInterupt(err)
@@ -88,6 +91,7 @@ public class CRRecorder: @unchecked Sendable {
             case .appleDevice(appleDeviceID: let appleDeviceID, filename: let filename):
                 print("[CRRecorder] 准备苹果设备录制 - 设备ID: \(appleDeviceID), 文件名: \(filename)")
                 let appleDeviceRecording = CRAppleDeviceRecording()
+                appleDeviceRecording.options = cameraOptions
                 try await appleDeviceRecording.prepare(deviceId: appleDeviceID)
                 appleDeviceCaptures[appleDeviceID] = appleDeviceRecording
                 break

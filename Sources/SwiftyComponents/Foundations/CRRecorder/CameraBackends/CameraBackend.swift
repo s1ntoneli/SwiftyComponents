@@ -7,5 +7,9 @@ protocol CameraBackend: AnyObject {
     func configure(session: AVCaptureSession, device: AVCaptureDevice, delegate: CaptureRecordingDelegate, queue: DispatchQueue) throws
     func start(fileURL: URL) async throws
     func stop() async throws -> URL?
+    func apply(options: CameraRecordingOptions)
 }
 
+extension CameraBackend {
+    func apply(options: CameraRecordingOptions) { /* default no-op */ }
+}
