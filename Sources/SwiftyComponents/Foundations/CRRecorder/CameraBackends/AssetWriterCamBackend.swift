@@ -18,6 +18,11 @@ final class AssetWriterCamBackend: CameraBackend {
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var acceptingSamples = true
     private var options: CameraRecordingOptions = .init()
+    // 仅当会话内存在音频输入时才写入音轨
+    private var hasAudioInputInSession: Bool = false
+    // 记录最后一帧视频样本以便在收尾时做一次 keepalive（与屏幕录制保持一致）
+    private var lastVideoSample: CMSampleBuffer?
+    private var lastVideoPTS: CMTime?
 
     func apply(options: CameraRecordingOptions) { self.options = options }
 
@@ -35,18 +40,21 @@ final class AssetWriterCamBackend: CameraBackend {
         vdo.setSampleBufferDelegate(delegate, queue: queue)
         self.videoDataOutput = vdo
 
-        // 如无音频输入，尝试按名称匹配添加对应音频输入
+        // 记录当前会话是否存在音频输入（摄像头方案通常没有，为避免写入空音轨导致分段/刷新异常，仅在存在音频输入时添加音频输出与写入器音轨）
         let hasAudioInput = session.inputs.contains { inp in
             guard let di = inp as? AVCaptureDeviceInput else { return false }
             return di.device.hasMediaType(.audio)
         }
+        self.hasAudioInputInSession = hasAudioInput
 
-        // 音频数据输出
-        let ado = AVCaptureAudioDataOutput()
-        if session.canAddOutput(ado) {
-            session.addOutput(ado)
-            ado.setSampleBufferDelegate(delegate, queue: queue)
-            self.audioDataOutput = ado
+        // 音频数据输出：仅当会话中确实存在音频输入设备时才添加
+        if hasAudioInput {
+            let ado = AVCaptureAudioDataOutput()
+            if session.canAddOutput(ado) {
+                session.addOutput(ado)
+                ado.setSampleBufferDelegate(delegate, queue: queue)
+                self.audioDataOutput = ado
+            }
         }
         session.commitConfiguration()
 
@@ -60,6 +68,8 @@ final class AssetWriterCamBackend: CameraBackend {
 
     func start(fileURL: URL) async throws {
         self.fileURL = fileURL
+        // 更新诊断中心文件路径，便于外部观察文件大小增长/片段刷新
+        RecorderDiagnostics.shared.setOutputFileURL(fileURL)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             self.startContinuation = continuation
         }
@@ -71,8 +81,18 @@ final class AssetWriterCamBackend: CameraBackend {
         // 停止回调，防止在标记 finished 后仍有 append 发生
         videoDataOutput?.setSampleBufferDelegate(nil, queue: nil)
         audioDataOutput?.setSampleBufferDelegate(nil, queue: nil)
+        // 在 markAsFinished 前尝试注入一次 keepalive，帮助触发尾段刷新
+        appendFinalKeepaliveIfNeeded()
         videoInput?.markAsFinished()
-        if let writer { await writer.finishWriting() }
+        audioInput?.markAsFinished()
+        if let writer {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                writer.finishWriting {
+                    if let err = writer.error { cont.resume(throwing: err) } else { cont.resume() }
+                }
+            }
+            RecorderDiagnostics.shared.onWriterStopped()
+        }
         AVCaptureSessionHelper.stopRecordingStep2Close(avSession: session)
         return fileURL
     }
@@ -83,9 +103,11 @@ final class AssetWriterCamBackend: CameraBackend {
         if writer == nil {
             // 按首帧尺寸创建视频输入与写入器
             guard let url = fileURL else { return }
-            do { self.writer = try AVAssetWriter(url: url, fileType: .mov) } catch { return }
-            // 固定 10s 片段
-            self.writer?.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 600)
+            do {
+                self.writer = try AVAssetWriter(url: url, fileType: .mov)
+                // 与屏幕录制保持一致，使用可调的 fragment 间隔，便于实时分段写入
+                self.writer?.movieFragmentInterval = CMTime(seconds: RecorderDiagnostics.shared.fragmentIntervalSeconds, preferredTimescale: 600)
+            } catch { return }
 
             var width = 1280
             var height = 720
@@ -134,31 +156,39 @@ final class AssetWriterCamBackend: CameraBackend {
             }
             let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
             vInput.expectsMediaDataInRealTime = true
-            // 同步创建音频输入
-            let aSettings: [String: Any] = [
-                AVFormatIDKey: kAudioFormatMPEG4AAC,
-                AVSampleRateKey: 44100,
-                AVNumberOfChannelsKey: 2,
-                AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-                AVEncoderBitRateKey: 128_000
-            ]
-            let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: aSettings)
-            aInput.expectsMediaDataInRealTime = true
+            // 同步创建音频输入：仅在会话存在音频输入时添加，避免空音轨阻滞片段刷新
+            var aInput: AVAssetWriterInput? = nil
+            if hasAudioInputInSession {
+                let aSettings: [String: Any] = [
+                    AVFormatIDKey: kAudioFormatMPEG4AAC,
+                    AVSampleRateKey: 44100,
+                    AVNumberOfChannelsKey: 2,
+                    AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+                    AVEncoderBitRateKey: 128_000
+                ]
+                let input = AVAssetWriterInput(mediaType: .audio, outputSettings: aSettings)
+                input.expectsMediaDataInRealTime = true
+                aInput = input
+            }
 
             if let writer, writer.canAdd(vInput) { writer.add(vInput); self.videoInput = vInput }
-            if let writer, writer.canAdd(aInput) { writer.add(aInput); self.audioInput = aInput }
+            if let writer, let aInput, writer.canAdd(aInput) { writer.add(aInput); self.audioInput = aInput }
 
             if let writer, writer.startWriting() {
                 writer.startSession(atSourceTime: pts)
                 writerSessionStarted = true
                 onFirstPTS?(pts)
+                RecorderDiagnostics.shared.onWriterStarted()
                 startContinuation?.resume(returning: ())
                 startContinuation = nil
             }
         }
 
         if acceptingSamples, let input = videoInput, input.isReadyForMoreMediaData, writer?.status == .writing {
-            _ = input.append(sampleBuffer)
+            if input.append(sampleBuffer) {
+                lastVideoSample = sampleBuffer
+                lastVideoPTS = sampleBuffer.presentationTimeStamp
+            }
         }
     }
 
@@ -168,5 +198,21 @@ final class AssetWriterCamBackend: CameraBackend {
         _ = aIn.append(sampleBuffer)
     }
 
-    
+    private func appendFinalKeepaliveIfNeeded() {
+        guard let base = lastVideoSample else { return }
+        let nowPTS = CMClockGetTime(CMClockGetHostTimeClock())
+        if let last = lastVideoPTS {
+            if CMTimeCompare(nowPTS, last) <= 0 { return }
+            let duration: CMTime = {
+                let d = base.duration
+                if d.isValid && d.value != 0 { return d }
+                return CMTime(value: 1, timescale: 60)
+            }()
+            var timing = CMSampleTimingInfo(duration: duration, presentationTimeStamp: nowPTS, decodeTimeStamp: base.decodeTimeStamp)
+            if let dup = try? CMSampleBuffer(copying: base, withNewTiming: [timing]),
+               let input = videoInput, input.isReadyForMoreMediaData, writer?.status == .writing {
+                _ = input.append(dup)
+            }
+        }
+    }
 }
