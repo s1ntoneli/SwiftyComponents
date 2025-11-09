@@ -91,6 +91,9 @@ public struct ScreenRecorderControl: View {
     // Per-session directories (avoid bundle.json being overwritten)
     @State private var currentSessionDirectory: URL? = nil
     @State private var lastBundleDirectory: URL? = nil
+    // Auto tests
+    @State private var showAutoTests: Bool = false
+    @State private var autoTester = RecorderAutoTester()
 
     // MARK: - Init
     public init(
@@ -112,6 +115,8 @@ public struct ScreenRecorderControl: View {
                 Spacer()
                 Button("Diagnostics") { showDiagnostics = true }
                     .accessibilityIdentifier("CRRecorder.Diagnostics")
+                Button("Auto Tests") { showAutoTests = true }
+                    .accessibilityIdentifier("CRRecorder.AutoTests")
             }
             .onReceive(timer) { now in
                 self.tick = now
@@ -370,6 +375,18 @@ public struct ScreenRecorderControl: View {
                 }
             }
             .padding()
+        }
+        .sheet(isPresented: $showAutoTests) {
+            RecorderAutoTestPanel(
+                tester: autoTester,
+                includeSystemAudio: persistedSystemAudio || configuration.captureSystemAudio,
+                includeMicrophone: persistedMicrophone || configuration.includeMicrophone,
+                includeCamera: persistedCamera,
+                displayID: selectedDisplayID.map { CGDirectDisplayID($0) } ?? configuration.displayID,
+                cropRect: configuration.cropRect,
+                baseDirectory: outputDirectory
+            )
+            .frame(minWidth: 700, minHeight: 560)
         }
         .onAppear {
             // Prefill a timestamped name so users don't need to type

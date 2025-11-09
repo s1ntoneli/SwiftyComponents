@@ -73,7 +73,12 @@ enum RecorderConfig {
         comp[AVVideoAverageBitRateKey] = max(1_000_000, target)
         comp[AVVideoExpectedSourceFrameRateKey] = fps
         comp[AVVideoMaxKeyFrameIntervalDurationKey] = 2
-        comp[AVVideoH264EntropyModeKey] = AVVideoH264EntropyModeCABAC
+        // 仅 H.264 支持 H264EntropyMode；HEVC 下设置该键会报错（"Compression property H264EntropyMode is not supported for video codec type hvc1"）
+        if mode == .h264_sRGB {
+            comp[AVVideoH264EntropyModeKey] = AVVideoH264EntropyModeCABAC
+        } else {
+            comp.removeValue(forKey: AVVideoH264EntropyModeKey)
+        }
         output[AVVideoCompressionPropertiesKey] = comp as NSDictionary
         return output
     }
@@ -138,4 +143,3 @@ private extension RecordMode {
         }
     }
 }
-

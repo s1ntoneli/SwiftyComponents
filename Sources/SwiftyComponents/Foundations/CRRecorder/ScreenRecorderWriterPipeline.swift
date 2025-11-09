@@ -44,6 +44,8 @@ struct WriterPipeline {
     }
 
     mutating func appendVideo(_ sample: CMSampleBuffer) {
+        // 若正在 finish 或尚未 startSession（例如“首帧前停止” race），直接丢弃，避免 AVAssetWriter 崩溃
+        if isFinishing || !didStartSession { return }
         let ready = videoInput.isReadyForMoreMediaData
         RecorderDiagnostics.shared.beforeAppendVideo(ready: ready, status: writer.status)
         guard writer.status == .writing, ready else {
@@ -59,6 +61,7 @@ struct WriterPipeline {
 
     func appendAudio(_ sample: CMSampleBuffer) {
         guard let audioInput else { return }
+        if isFinishing || !didStartSession { return }
         let ready = audioInput.isReadyForMoreMediaData
         RecorderDiagnostics.shared.beforeAppendAudio(ready: ready, status: writer.status)
         guard writer.status == .writing, ready else {
