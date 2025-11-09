@@ -13,6 +13,7 @@ import CoreServices
 import CoreGraphics
 import Darwin
 
+#if DEBUG
 public final class RecorderDiagnostics: ObservableObject, @unchecked Sendable {
     public static let shared = RecorderDiagnostics()
 
@@ -437,6 +438,93 @@ public final class RecorderDiagnostics: ObservableObject, @unchecked Sendable {
         return (user, sys, rss, footprint, virt)
     }
 }
+#else
+// MARK: - Release build lightweight stub (no overhead)
+public final class RecorderDiagnostics: ObservableObject, @unchecked Sendable {
+    public static let shared = RecorderDiagnostics()
+
+    // Keep the same published surface to avoid API changes
+    @Published public private(set) var streamActive: Bool = false
+    @Published public private(set) var configuredFPS: Int? = nil
+    @Published public private(set) var configuredWidth: Int? = nil
+    @Published public private(set) var configuredHeight: Int? = nil
+    @Published public private(set) var queueDepth: Int? = nil
+    @Published public private(set) var pixelFormatName: String? = nil
+    @Published public private(set) var colorSpaceName: String? = nil
+
+    @Published public private(set) var measuredFPS: Double = 0
+    @Published public private(set) var lastFrameSize: CGSize = .zero
+    @Published public private(set) var lastFrameWallTime: Date? = nil
+
+    @Published public private(set) var writerActive: Bool = false
+    @Published public private(set) var outputFileURL: URL? = nil
+    @Published public private(set) var currentFileSizeBytes: Int64 = 0
+    @Published public private(set) var fileSizeSeries: [FileSizePoint] = []
+
+    @Published public private(set) var systemSnapshot: SystemSnapshot? = nil
+
+    @Published public private(set) var errors: [ErrorRecord] = []
+    @Published public private(set) var events: [StateEvent] = []
+    @Published public private(set) var flowLogs: [StateEvent] = []
+
+    @Published public private(set) var pendingVideoCount: Int = 0
+    @Published public private(set) var pendingVideoCapacity: Int = 0
+    @Published public private(set) var pendingAudioCount: Int = 0
+    @Published public private(set) var pendingAudioCapacity: Int = 0
+
+    @Published public private(set) var fragmentIntervalSeconds: Double = 10.0
+
+    @Published public var logEventsToConsole: Bool = false
+    @Published public var logFlowToConsole: Bool = false
+
+    @Published public private(set) var capturedVideoFrames: UInt64 = 0
+    @Published public private(set) var capturedAudioSamples: UInt64 = 0
+    @Published public private(set) var appendedVideoFrames: UInt64 = 0
+    @Published public private(set) var appendedAudioSamples: UInt64 = 0
+    @Published public private(set) var droppedVideoNotReady: UInt64 = 0
+    @Published public private(set) var droppedAudioNotReady: UInt64 = 0
+    @Published public private(set) var writerVideoFailedCount: UInt64 = 0
+    @Published public private(set) var lastVideoReadyForMore: Bool = false
+    @Published public private(set) var lastAudioReadyForMore: Bool = false
+    @Published public private(set) var lastVideoWriterStatus: String = "unknown"
+    @Published public private(set) var lastAudioWriterStatus: String = "unknown"
+
+    private init() {}
+
+    // No-op APIs to avoid any runtime overhead in release builds
+    public func onStartCapture(configuration: SCStreamConfiguration) {}
+    public func onStopCapture() {}
+    public func onStreamDidBecomeActive() {}
+    public func onStreamDidBecomeInactive() {}
+
+    public func onVideoSample(size: CGSize) {}
+
+    public func setOutputFileURL(_ url: URL?) {}
+    public func onWriterStarted() {}
+    public func onWriterStopped() {}
+
+    public func recordError(_ error: Error) {}
+    public func recordEvent(_ message: String) {}
+
+    public func startFileSizeSamplingIfNeeded() {}
+    public func stopFileSizeSamplingIfNeeded() {}
+
+    public func logFlow(_ message: String) {}
+
+    public func updatePendingCounts(video: Int, videoCap: Int, audio: Int, audioCap: Int) {}
+
+    public func setFragmentInterval(seconds: Double) {}
+    public func onCaptureVideoFrame() {}
+    public func onCaptureAudioSample() {}
+    public func beforeAppendVideo(ready: Bool, status: AVAssetWriter.Status) {}
+    public func beforeAppendAudio(ready: Bool, status: AVAssetWriter.Status) {}
+    public func onAppendedVideo() {}
+    public func onAppendedAudio() {}
+    public func onDroppedVideoNotReady() {}
+    public func onDroppedAudioNotReady() {}
+    public func onWriterVideoFailed() {}
+}
+#endif
 
 // MARK: - DTOs for UI
 public struct ErrorRecord: Identifiable, Sendable {
@@ -514,8 +602,12 @@ extension RecorderDiagnostics {
 
     // Minimal helper to avoid creating Tasks; dispatch to main if needed.
     private func setOnMain(_ apply: @escaping () -> Void) {
+        #if DEBUG
         if Thread.isMainThread { apply() }
         else { DispatchQueue.main.async(execute: apply) }
+        #else
+        apply()
+        #endif
     }
 }
 
