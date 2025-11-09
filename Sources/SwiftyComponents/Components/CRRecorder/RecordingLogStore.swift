@@ -7,6 +7,7 @@ struct RecordingLogItem: Codable, Identifiable, Equatable, Sendable {
     var endedAt: Date?
     var clickDurationSeconds: Double?
     var videoDurationSeconds: Double?
+    var offsetSeconds: Double?
     var note: String = ""
 }
 
@@ -42,4 +43,3 @@ struct RecordingLogStore {
         }
     }
 }
-

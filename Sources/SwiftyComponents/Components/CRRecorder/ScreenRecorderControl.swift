@@ -6,6 +6,7 @@ import Combine
 import AppKit
 import CoreGraphics
 import AVFoundation
+import AVKit
 @preconcurrency import ScreenCaptureKit
 
 /// A simple control to start/stop screen recording using CRRecorder.
@@ -67,6 +68,8 @@ public struct ScreenRecorderControl: View {
     @AppStorage("CRDemo.IncludeSystemAudio") private var persistedSystemAudio: Bool = false
     @AppStorage("CRDemo.IncludeMicrophone") private var persistedMicrophone: Bool = false
     @AppStorage("CRDemo.SelectedMicrophoneID") private var persistedMicID: String = "default"
+    @AppStorage("CRDemo.IncludeCamera") private var persistedCamera: Bool = false
+    @AppStorage("CRDemo.SelectedCameraID") private var persistedCamID: String = "default"
     // Content lists
     @State private var displays: [SCDisplay] = []
     @State private var windows: [SCWindow] = []
@@ -75,9 +78,19 @@ public struct ScreenRecorderControl: View {
     // Microphones
     @State private var microphones: [AVCaptureDevice] = []
     @State private var selectedMicrophoneID: String? = nil
+    // Cameras
+    @State private var cameras: [AVCaptureDevice] = []
+    @State private var selectedCameraID: String? = nil
 
     // Keep a reference while recording
     @State private var recorder: CRRecorder? = nil
+    // Player sheet state
+    @State private var showPlayer: Bool = false
+    @State private var avPlayer: AVPlayer? = nil
+    @State private var playerTitle: String = ""
+    // Per-session directories (avoid bundle.json being overwritten)
+    @State private var currentSessionDirectory: URL? = nil
+    @State private var lastBundleDirectory: URL? = nil
 
     // MARK: - Init
     public init(
@@ -169,13 +182,15 @@ public struct ScreenRecorderControl: View {
                     .textFieldStyle(.roundedBorder)
             }
 
-            // Audio options (persisted)
+            // Capture options (persisted)
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 12) {
                     Toggle("System Audio", isOn: $persistedSystemAudio)
                         .accessibilityIdentifier("CRRecorder.Toggle.SystemAudio")
                     Toggle("Microphone", isOn: $persistedMicrophone)
                         .accessibilityIdentifier("CRRecorder.Toggle.Microphone")
+                    Toggle("Camera", isOn: $persistedCamera)
+                        .accessibilityIdentifier("CRRecorder.Toggle.Camera")
                 }
                 if persistedMicrophone {
                     HStack(spacing: 8) {
@@ -193,6 +208,24 @@ public struct ScreenRecorderControl: View {
                         }
                         .frame(minWidth: 220)
                         .accessibilityIdentifier("CRRecorder.Picker.Microphone")
+                    }
+                }
+                if persistedCamera {
+                    HStack(spacing: 8) {
+                        Text("Cam:")
+                        Picker("Camera", selection: Binding(get: {
+                            selectedCameraID ?? persistedCamID
+                        }, set: { newID in
+                            selectedCameraID = newID
+                            persistedCamID = newID
+                        })) {
+                            Text("系统默认").tag("default")
+                            ForEach(cameras, id: \.uniqueID) { d in
+                                Text(d.localizedName).tag(d.uniqueID)
+                            }
+                        }
+                        .frame(minWidth: 220)
+                        .accessibilityIdentifier("CRRecorder.Picker.Camera")
                     }
                 }
             }
@@ -288,12 +321,23 @@ public struct ScreenRecorderControl: View {
                                         .lineLimit(1)
                                         .truncationMode(.middle)
                                     Spacer()
+                                    Button("Play") { playLogItem(item) }
+                                        .accessibilityIdentifier("CRRecorder.History.Play")
+                                    Button("Play Session") { playSession(for: item) }
+                                        .accessibilityIdentifier("CRRecorder.History.PlaySession")
+                                    Button("Play Cam+Mic") { playCamMic(for: item) }
+                                        .accessibilityIdentifier("CRRecorder.History.PlayCamMic")
+                                    Button("Export Session") { exportSession(for: item) }
+                                        .accessibilityIdentifier("CRRecorder.History.ExportSession")
                                     Button("Open") { NSWorkspace.shared.open(URL(fileURLWithPath: item.filePath)) }
                                     Button("Reveal") { NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: item.filePath)]) }
                                 }
                                 HStack(spacing: 12) {
                                     if let s = item.clickDurationSeconds { Text("点击时长: \(formatSeconds(s))").font(.caption) }
                                     if let v = item.videoDurationSeconds { Text("文件时长: \(formatSeconds(v))").font(.caption) }
+                                    if let off = item.offsetSeconds {
+                                        Text(String(format: "偏移: %.2fs", off)).font(.caption)
+                                    }
                                 }
                                 HStack(spacing: 8) {
                                     Text("备注:").font(.caption)
@@ -313,8 +357,19 @@ public struct ScreenRecorderControl: View {
             }
         }
         .padding()
-        .sheet(isPresented: $showDiagnostics) {
-            RecorderDiagnosticsView()
+        .sheet(isPresented: $showDiagnostics) { RecorderDiagnosticsView() }
+        .sheet(isPresented: $showPlayer, onDismiss: { avPlayer?.pause() }) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(playerTitle).font(.headline).lineLimit(1).truncationMode(.middle)
+                if let p = avPlayer {
+                    VideoPlayer(player: p)
+                        .frame(minWidth: 640, minHeight: 360)
+                        .onAppear { p.play() }
+                } else {
+                    Text("无法加载播放器").foregroundStyle(.secondary)
+                }
+            }
+            .padding()
         }
         .onAppear {
             // Prefill a timestamped name so users don't need to type
@@ -323,7 +378,9 @@ public struct ScreenRecorderControl: View {
             if configuration.captureSystemAudio && !persistedSystemAudio { persistedSystemAudio = true }
             if configuration.includeMicrophone && !persistedMicrophone { persistedMicrophone = true }
             reloadMicrophones()
+            reloadCameras()
             if selectedMicrophoneID == nil { selectedMicrophoneID = persistedMicID }
+            if selectedCameraID == nil { selectedCameraID = persistedCamID }
             loadLogs()
         }
         .task { await reloadContent() }
@@ -345,6 +402,10 @@ public struct ScreenRecorderControl: View {
 
         // Always generate a fresh timestamped base name
         fileName = Self.timestampedFilenamePrefix("capture")
+        // Create a per-session subdirectory so bundle.json won't be overwritten by later sessions
+        let sessionDir = outputDirectory.appendingPathComponent(fileName)
+        do { try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true) } catch { }
+        currentSessionDirectory = sessionDir
 
         // Build primary scheme
         let scheme: CRRecorder.SchemeItem
@@ -364,8 +425,13 @@ public struct ScreenRecorderControl: View {
             let micID = selectedMicrophoneID ?? persistedMicID
             schemes.append(.microphone(microphoneID: micID.isEmpty ? "default" : micID, filename: micName))
         }
+        if persistedCamera {
+            let camName = fileName + "-cam"
+            let camID = selectedCameraID ?? persistedCamID
+            schemes.append(.camera(cameraID: camID.isEmpty ? "default" : camID, filename: camName))
+        }
 
-        let rec = CRRecorder(schemes, outputDirectory: outputDirectory)
+        let rec = CRRecorder(schemes, outputDirectory: sessionDir)
         // Pass options
         var opts = ScreenRecorderOptions(
             fps: fps,
@@ -401,6 +467,7 @@ public struct ScreenRecorderControl: View {
             let result = try await rec.stopRecordingWithResult()
             isRecording = false
             lastSavedFiles = result.bundleInfo.files.map { $0.filename }
+            lastBundleDirectory = result.bundleURL
             onComplete?(result)
             await updateLatestFileDuration()
             appendAndPersistLog()
@@ -450,14 +517,102 @@ public struct ScreenRecorderControl: View {
 
     private func openLatestFile() {
         guard let last = lastSavedFiles.last else { return }
-        let url = outputDirectory.appendingPathComponent(last)
+        let base = lastBundleDirectory ?? currentSessionDirectory ?? outputDirectory
+        let url = base.appendingPathComponent(last)
         NSWorkspace.shared.open(url)
     }
 
     private func revealLatestFile() {
         guard let last = lastSavedFiles.last else { return }
-        let url = outputDirectory.appendingPathComponent(last)
+        let base = lastBundleDirectory ?? currentSessionDirectory ?? outputDirectory
+        let url = base.appendingPathComponent(last)
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func playLogItem(_ item: RecordingLogItem) {
+        let url = URL(fileURLWithPath: item.filePath)
+        playerTitle = url.lastPathComponent
+        avPlayer = AVPlayer(url: url)
+        showPlayer = true
+    }
+
+    private func playSession(for item: RecordingLogItem) {
+        let fileURL = URL(fileURLWithPath: item.filePath)
+        let dir = fileURL.deletingLastPathComponent()
+        let bundleURL = dir.appendingPathComponent("bundle.json")
+        do {
+            let data = try Data(contentsOf: bundleURL)
+            let info = try JSONDecoder().decode(CRRecorder.BundleInfo.self, from: data)
+            // 摄像头为主，屏幕作为 PiP，PiP 稍大一些
+            let opts = MediaCompositionBuilder.Options(includeScreen: true, includeCamera: true, includeMicrophone: true, pipScale: 0.4, pipMargin: 16, background: .camera)
+            let out = try MediaCompositionBuilder.build(from: .init(bundleInfo: info, baseDirectory: dir), options: opts)
+            let pItem = AVPlayerItem(asset: out.composition)
+            pItem.videoComposition = out.videoComposition
+            playerTitle = "Session Composition"
+            avPlayer = AVPlayer(playerItem: pItem)
+            showPlayer = true
+        } catch {
+            // 回退：打开单文件
+            playLogItem(item)
+        }
+    }
+
+    private func playCamMic(for item: RecordingLogItem) {
+        let fileURL = URL(fileURLWithPath: item.filePath)
+        let dir = fileURL.deletingLastPathComponent()
+        let bundleURL = dir.appendingPathComponent("bundle.json")
+        do {
+            let data = try Data(contentsOf: bundleURL)
+            let info = try JSONDecoder().decode(CRRecorder.BundleInfo.self, from: data)
+            let out = try MediaCompositionBuilder.build(from: .init(bundleInfo: info, baseDirectory: dir), options: .camMicOnly)
+            let pItem = AVPlayerItem(asset: out.composition)
+            pItem.videoComposition = out.videoComposition
+            playerTitle = "Camera+Mic Composition"
+            avPlayer = AVPlayer(playerItem: pItem)
+            showPlayer = true
+        } catch {
+            playLogItem(item)
+        }
+    }
+
+    private func exportSession(for item: RecordingLogItem) {
+        let fileURL = URL(fileURLWithPath: item.filePath)
+        let dir = fileURL.deletingLastPathComponent()
+        let bundleURL = dir.appendingPathComponent("bundle.json")
+        do {
+            let data = try Data(contentsOf: bundleURL)
+            let info = try JSONDecoder().decode(CRRecorder.BundleInfo.self, from: data)
+            let opts = MediaCompositionBuilder.Options(includeScreen: true, includeCamera: true, includeMicrophone: true, pipScale: 0.4, pipMargin: 16, background: .camera)
+            let out = try MediaCompositionBuilder.build(from: .init(bundleInfo: info, baseDirectory: dir), options: opts)
+            guard let exporter = AVAssetExportSession(asset: out.composition, presetName: AVAssetExportPresetHighestQuality) else { return }
+            exporter.videoComposition = out.videoComposition
+            var target = dir.appendingPathComponent(Self.timestampedFilenamePrefix("merged")).appendingPathExtension("mov")
+            // ensure unique name
+            var i = 1
+            while FileManager.default.fileExists(atPath: target.path) {
+                let stem = target.deletingPathExtension().lastPathComponent
+                let base = stem + " (\(i))"
+                target.deletePathExtension()
+                target.deleteLastPathComponent()
+                target = dir.appendingPathComponent(base).appendingPathExtension("mov")
+                i += 1
+            }
+            exporter.outputURL = target
+            exporter.outputFileType = .mov
+            exporter.exportAsynchronously {
+                DispatchQueue.main.async {
+                    if exporter.status == .completed {
+                        NSWorkspace.shared.activateFileViewerSelecting([target])
+                    } else if let err = exporter.error {
+                        self.errorMessage = err.localizedDescription
+                    } else {
+                        self.errorMessage = "Export failed"
+                    }
+                }
+            }
+        } catch {
+            self.errorMessage = error.localizedDescription
+        }
     }
 
     private func reloadMicrophones() {
@@ -465,6 +620,14 @@ public struct ScreenRecorderControl: View {
         microphones = AVCaptureDevice.devices(for: .audio)
         #else
         microphones = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInMicrophone], mediaType: .audio, position: .unspecified).devices
+        #endif
+    }
+
+    private func reloadCameras() {
+        #if os(macOS)
+        cameras = AVCaptureDevice.devices(for: .video)
+        #else
+        cameras = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInWideAngleCamera], mediaType: .video, position: .unspecified).devices
         #endif
     }
 
@@ -478,6 +641,7 @@ public struct ScreenRecorderControl: View {
                 let result = try await rec.stopRecordingWithResult()
                 self.isRecording = false
                 self.lastSavedFiles = result.bundleInfo.files.map { $0.filename }
+                self.lastBundleDirectory = result.bundleURL
                 self.onComplete?(result)
                 await self.updateLatestFileDuration()
                 self.appendAndPersistLog()
@@ -518,7 +682,8 @@ public struct ScreenRecorderControl: View {
 
     @MainActor private func updateLatestFileDuration() async {
         guard let name = lastSavedFiles.last else { latestFileDuration = nil; return }
-        let url = outputDirectory.appendingPathComponent(name)
+        let base = lastBundleDirectory ?? currentSessionDirectory ?? outputDirectory
+        let url = base.appendingPathComponent(name)
         let asset = AVURLAsset(url: url)
         do {
             let time = try await asset.load(.duration)
@@ -531,18 +696,90 @@ public struct ScreenRecorderControl: View {
 
     // MARK: - Logs
     private func currentStore() -> RecordingLogStore { RecordingLogStore(directory: outputDirectory) }
-    private func loadLogs() { logs = currentStore().load() }
+    private func loadLogs() {
+        logs = currentStore().load().sorted(by: { lhs, rhs in
+            let l = lhs.endedAt ?? lhs.startedAt ?? .distantPast
+            let r = rhs.endedAt ?? rhs.startedAt ?? .distantPast
+            return l > r
+        })
+    }
     private func saveLogs() { currentStore().save(logs) }
     private func appendAndPersistLog() {
-        guard let fileName = lastSavedFiles.last else { return }
-        let path = outputDirectory.appendingPathComponent(fileName).path
-        let started = recordStartAt
-        let ended = Date()
-        let click = recordStartAt.map { ended.timeIntervalSince($0) }
-        let video = latestFileDuration
-        let item = RecordingLogItem(filePath: path, startedAt: started, endedAt: ended, clickDurationSeconds: click, videoDurationSeconds: video, note: "")
-        logs.append(item)
+        guard !lastSavedFiles.isEmpty else { return }
+        // 从 bundle.json 读取每个文件的开始时间，计算相对最早开始时间的偏移
+        let sessionBase = lastBundleDirectory ?? currentSessionDirectory ?? outputDirectory
+        let bundleURL = sessionBase.appendingPathComponent("bundle.json")
+        var fileStartMap: [String: (start: CFAbsoluteTime?, end: CFAbsoluteTime?)] = [:]
+        var earliest: CFAbsoluteTime? = nil
+        if let data = try? Data(contentsOf: bundleURL) {
+            let dec = JSONDecoder()
+            if let info = try? dec.decode(CRRecorder.BundleInfo.self, from: data) {
+                for f in info.files {
+                    fileStartMap[f.filename] = (f.recordingStartTimestamp, f.recordingEndTimestamp)
+                    if let s = f.recordingStartTimestamp {
+                        earliest = min(earliest ?? s, s)
+                    }
+                }
+            }
+        }
+        let clickEnded = Date()
+        let click = recordStartAt.map { clickEnded.timeIntervalSince($0) }
+        // 逐个保存历史项
+        for name in lastSavedFiles {
+            let pathURL = sessionBase.appendingPathComponent(name)
+            // 读取文件时长
+            var video: TimeInterval? = nil
+            let asset = AVURLAsset(url: pathURL)
+            if let dur = try? awaitDuration(asset) { video = dur }
+
+            // 偏移：文件开始时间相对最早开始时间
+            var off: Double? = nil
+            if let base = earliest, let rec = fileStartMap[name]?.start { off = rec - base }
+            // startedAt/endedAt（使用录制时间戳转换为 Date；如缺失则使用点击时间）
+            let startedAt: Date? = {
+                if let s = fileStartMap[name]?.start { return Date(timeIntervalSinceReferenceDate: s) }
+                return recordStartAt
+            }()
+            let endedAt: Date? = {
+                if let e = fileStartMap[name]?.end { return Date(timeIntervalSinceReferenceDate: e) }
+                return clickEnded
+            }()
+
+            let item = RecordingLogItem(
+                filePath: pathURL.path,
+                startedAt: startedAt,
+                endedAt: endedAt,
+                clickDurationSeconds: click,
+                videoDurationSeconds: video,
+                offsetSeconds: off,
+                note: ""
+            )
+            logs.append(item)
+        }
+        // 时间倒序排序并保存
+        logs.sort(by: { lhs, rhs in
+            let l = lhs.endedAt ?? lhs.startedAt ?? .distantPast
+            let r = rhs.endedAt ?? rhs.startedAt ?? .distantPast
+            return l > r
+        })
         saveLogs()
+    }
+
+    // 同步加载 AVURLAsset 时长（秒）
+    private func awaitDuration(_ asset: AVURLAsset) -> TimeInterval? {
+        let semaphore = DispatchSemaphore(value: 0)
+        var result: TimeInterval? = nil
+        asset.loadValuesAsynchronously(forKeys: ["duration"]) {
+            var error: NSError? = nil
+            let status = asset.statusOfValue(forKey: "duration", error: &error)
+            if status == .loaded {
+                let sec = CMTimeGetSeconds(asset.duration)
+                if sec.isFinite { result = sec }
+            }
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 2)
+        return result
     }
 
     // MARK: - Content loading
