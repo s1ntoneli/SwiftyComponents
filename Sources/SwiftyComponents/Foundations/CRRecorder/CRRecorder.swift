@@ -25,25 +25,25 @@ public class CRRecorder: @unchecked Sendable {
 //    public var microphoneBackend: CRMicrophoneRecording.Backend = .fileOutput
     
     nonisolated(unsafe)
-    var onInterupt: (Error) -> Void = {_ in}
+    public var onInterupt: (Error) -> Void = {_ in}
     
     var resultSubject: PassthroughSubject<Result, Error> = .init()
-    var audioLevelSubject: PassthroughSubject<Float, Never> = .init()
+    public var audioLevelSubject: PassthroughSubject<Float, Never> = .init()
     
-    init(_ schemes: [SchemeItem], outputDirectory: URL) {
+    public init(_ schemes: [SchemeItem], outputDirectory: URL) {
         self.schemes = schemes
         self.outputDirectory = outputDirectory
         print("[CRRecorder] 初始化录制器，输出目录: \(outputDirectory.path), 录制方案数量: \(schemes.count)")
     }
     
-    func prepare(_ schemes: [SchemeItem]) async throws {
+    public func prepare(_ schemes: [SchemeItem]) async throws {
         print("[CRRecorder] 开始准备录制方案，共 \(schemes.count) 个")
         self.schemes = schemes
         
         for scheme in schemes {
             print("[CRRecorder] 准备录制方案: \(scheme.id)")
             switch scheme {
-            case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename):
+            case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename, _):
                 print("[CRRecorder] 准备屏幕录制 - 显示器ID: \(displayId), 文件名: \(filename), HDR: \(hdr), 系统音频: \(captureSystemAudio)")
                 screenCaptureSessions = ScreenCaptureRecorder(filePath: outputDirectory.appendingPathComponent(filename).appendingPathExtension("mov").path(percentEncoded: false), options: screenOptions)
                 screenCaptureSessions?.errorHandler = {
@@ -91,7 +91,7 @@ public class CRRecorder: @unchecked Sendable {
         print("[CRRecorder] 录制方案准备完成")
     }
     
-    func startRecording() async throws {
+    public func startRecording() async throws {
         // 确保输出目录存在
         if !FileManager.default.fileExists(atPath: outputDirectory.path) {
             print("[CRRecorder] 创建输出目录: \(outputDirectory.path)")
@@ -144,7 +144,7 @@ public class CRRecorder: @unchecked Sendable {
         var fileAssets: [BundleInfo.FileAsset] = []
         for scheme in schemes {
             switch scheme {
-            case .display(displayID: let displayID, area: let area, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
+            case .display(displayID: let displayID, area: let area, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename, _):
                 let assets = screenCaptureSessions?.packLastResult() ?? []
                 fileAssets.append(contentsOf: assets)
             case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
@@ -178,8 +178,8 @@ public class CRRecorder: @unchecked Sendable {
     
     func startRecord(scheme: SchemeItem) async throws {
         switch scheme {
-        case .display(displayID: let displayID, area: let area, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
-            try await screenCaptureSessions?.startScreenCapture(displayID: displayID, cropRect: area, hdr: hdr, showsCursor: screenOptions.showsCursor, includeAudio: captureSystemAudio)
+        case .display(displayID: let displayID, area: let area, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename, let excludedWindowTitles):
+            try await screenCaptureSessions?.startScreenCapture(displayID: displayID, cropRect: area, hdr: hdr, showsCursor: screenOptions.showsCursor, includeAudio: captureSystemAudio, excludedWindowTitles: excludedWindowTitles)
         case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
             try await screenCaptureSessions?.startWindowCapture(windowID: windowID, displayID: displayId, hdr: hdr, includeAudio: captureSystemAudio)
         case .camera(cameraID: let cameraID, filename: let filename):
@@ -233,9 +233,9 @@ public class CRRecorder: @unchecked Sendable {
         print("[CRRecorder] 开始执行录制方案: \(scheme.id)")
         
         switch scheme {
-        case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename):
+        case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename, let excludedWindowTitles):
             print("[CRRecorder] 开始屏幕录制")
-            return try await screenCaptureSessions?.startScreenCapture(displayID: displayId, cropRect: area, hdr: hdr, showsCursor: screenOptions.showsCursor, includeAudio: captureSystemAudio) ?? []
+            return try await screenCaptureSessions?.startScreenCapture(displayID: displayId, cropRect: area, hdr: hdr, showsCursor: screenOptions.showsCursor, includeAudio: captureSystemAudio, excludedWindowTitles: excludedWindowTitles) ?? []
         case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
             print("[CRRecorder] 开始窗口录制")
             return try await screenCaptureSessions?.startWindowCapture(windowID: windowID, displayID: displayId, hdr: hdr, includeAudio: captureSystemAudio) ?? []
@@ -261,7 +261,7 @@ public class CRRecorder: @unchecked Sendable {
                 group.addTask {
                     print("[CRRecorder] 停止录制方案: \(scheme.id)")
                     switch scheme {
-                    case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename):
+                    case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename, _):
                         print("[CRRecorder] 停止屏幕录制")
                         try await self.screenCaptureSessions?.stop()
                         break
@@ -349,7 +349,7 @@ public class CRRecorder: @unchecked Sendable {
     
     func stopRecordingWithResult(scheme: SchemeItem) async throws -> [BundleInfo.FileAsset] {
         switch scheme {
-        case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename):
+        case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename, _):
             print("[CRRecorder] 停止屏幕录制")
             return try await screenCaptureSessions?.stop() ?? []
         case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
@@ -389,7 +389,7 @@ public class CRRecorder: @unchecked Sendable {
     }
     
     public enum SchemeItem: Identifiable, Hashable, Equatable, Sendable {
-        case display(displayID: CGDirectDisplayID, area: CGRect?, hdr: Bool, captureSystemAudio: Bool, filename: String)
+        case display(displayID: CGDirectDisplayID, area: CGRect?, hdr: Bool, captureSystemAudio: Bool, filename: String, excludedWindowTitles: [String])
         case window(displayId: CGDirectDisplayID, windowID: CGWindowID, hdr: Bool, captureSystemAudio: Bool, filename: String)
         case camera(cameraID: String, filename: String)
         case microphone(microphoneID: String, filename: String)
@@ -397,7 +397,7 @@ public class CRRecorder: @unchecked Sendable {
         
         public var id: String {
             switch self {
-            case .display(let displayId, _, _, _, _):
+            case .display(let displayId, _, _, _, _, _):
                 return "display_\(displayId)"
             case .window(let displayId, let windowID, _, _, _):
                 return "window_\(displayId)_\(windowID)"

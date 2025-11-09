@@ -35,7 +35,8 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         cropRect: CGRect?,
         hdr: Bool,
         showsCursor: Bool,
-        includeAudio: Bool
+        includeAudio: Bool,
+        excludedWindowTitles: [String]
     ) async throws -> [CRRecorder.BundleInfo.FileAsset] {
         recordingStartTimestamp = CFAbsoluteTimeGetCurrent()
         let content = try await SCShareableContent.current
@@ -46,7 +47,9 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         opts.hdr = hdr
         opts.showsCursor = showsCursor
         opts.includeAudio = includeAudio
-        let filter = SCContentFilter(display: display, excludingWindows: [])
+        // 基于本次录制配置传入的标题列表，屏蔽对应窗口
+        let excluded = Self.windows(withTitles: Set(excludedWindowTitles), in: content)
+        let filter = SCContentFilter(display: display, excludingWindows: excluded)
         let config = try RecorderConfig.make(for: display, cropRect: cropRect, options: opts)
         try prepareWriter(urlPath: filePath, configuration: config, options: opts)
         try startStream(configuration: config, filter: filter, options: opts)
@@ -115,8 +118,10 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
             // finalize 后丢弃晚到样本
             guard self.allowAppend else { return }
             if var writer = self.writer, !writer.didStartSession {
-                writer.startSession(at: sample.presentationTimeStamp)
-                self.firstFrameTimestamp = CFAbsoluteTimeGetCurrent()
+                // Use the first video sample's PTS as the recording start time (for A/V alignment)
+                let pts = sample.presentationTimeStamp
+                writer.startSession(at: pts)
+                self.firstFrameTimestamp = pts.seconds
                 RecorderDiagnostics.shared.onWriterStarted()
                 RecorderDiagnostics.shared.recordEvent("Writer session started")
                 self.writer = writer // write-back mutated struct
@@ -193,5 +198,20 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
             try? s.removeStreamOutput(out, type: .audio)
         }
         output = nil
+    }
+}
+
+// MARK: - Per-record exclusion matching
+private extension ScreenCaptureRecorder {
+    static func windows(withTitles titles: Set<String>, in content: SCShareableContent) -> [SCWindow] {
+        guard !titles.isEmpty else { return [] }
+        let myBundleID = Bundle.main.bundleIdentifier
+        return content.windows.filter { w in
+            guard let t = w.title, !t.isEmpty else { return false }
+            guard let bid = w.owningApplication?.bundleIdentifier else { return false }
+            // 仅过滤当前 App 生成的窗口，避免误伤其他应用
+            guard bid == myBundleID else { return false }
+            return titles.contains(t)
+        }
     }
 }

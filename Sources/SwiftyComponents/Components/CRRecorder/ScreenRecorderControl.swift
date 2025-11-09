@@ -287,7 +287,7 @@ public struct ScreenRecorderControl: View {
             scheme = .window(displayId: 0, windowID: CGWindowID(widInt), hdr: hdr, captureSystemAudio: configuration.captureSystemAudio, filename: fileName)
         } else {
             let dispID: CGDirectDisplayID = selectedDisplayID.map { CGDirectDisplayID($0) } ?? configuration.displayID
-            scheme = .display(displayID: dispID, area: configuration.cropRect, hdr: hdr, captureSystemAudio: configuration.captureSystemAudio, filename: fileName)
+            scheme = .display(displayID: dispID, area: configuration.cropRect, hdr: hdr, captureSystemAudio: configuration.captureSystemAudio, filename: fileName, excludedWindowTitles: [])
         }
 
         let rec = CRRecorder([scheme], outputDirectory: outputDirectory)
