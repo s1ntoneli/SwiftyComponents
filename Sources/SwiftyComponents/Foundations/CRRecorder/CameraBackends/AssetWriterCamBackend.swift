@@ -25,11 +25,15 @@ final class AssetWriterCamBackend: CameraBackend {
     private var lastVideoPTS: CMTime?
 
     func apply(options: CameraRecordingOptions) { self.options = options }
+    private var didSignalError = false
+    private var observers: [Any] = []
+    private var observedDeviceID: String?
 
     func configure(session: AVCaptureSession, device: AVCaptureDevice, delegate: CaptureRecordingDelegate, queue: DispatchQueue) throws {
         self.session = session
         self.delegate = delegate
         self.device = device
+        self.observedDeviceID = device.uniqueID
 
         session.beginConfiguration()
         // 视频数据输出
@@ -64,6 +68,9 @@ final class AssetWriterCamBackend: CameraBackend {
         delegate.onAudioSample = { [weak self] sampleBuffer in
             self?.handleAudioSample(sampleBuffer)
         }
+
+        // 仅用于抛错通知上层停止；不在后端做自动重连
+        installObservers(for: session)
     }
 
     func start(fileURL: URL) async throws {
@@ -94,6 +101,7 @@ final class AssetWriterCamBackend: CameraBackend {
             RecorderDiagnostics.shared.onWriterStopped()
         }
         AVCaptureSessionHelper.stopRecordingStep2Close(avSession: session)
+        removeObservers()
         return fileURL
     }
 
@@ -174,28 +182,47 @@ final class AssetWriterCamBackend: CameraBackend {
             if let writer, writer.canAdd(vInput) { writer.add(vInput); self.videoInput = vInput }
             if let writer, let aInput, writer.canAdd(aInput) { writer.add(aInput); self.audioInput = aInput }
 
-            if let writer, writer.startWriting() {
-                writer.startSession(atSourceTime: pts)
-                writerSessionStarted = true
-                onFirstPTS?(pts)
-                RecorderDiagnostics.shared.onWriterStarted()
-                startContinuation?.resume(returning: ())
-                startContinuation = nil
+            if let writer {
+                if writer.startWriting() {
+                    writer.startSession(atSourceTime: pts)
+                    writerSessionStarted = true
+                    onFirstPTS?(pts)
+                    startContinuation?.resume(returning: ())
+                    startContinuation = nil
+                } else if !didSignalError {
+                    didSignalError = true
+                    delegate?.onError(writer.error ?? RecordingError.recordingFailed("Camera writer start failed"))
+                }
             }
         }
 
         if acceptingSamples, let input = videoInput, input.isReadyForMoreMediaData, writer?.status == .writing {
-            if input.append(sampleBuffer) {
+            let ok = input.append(sampleBuffer)
+            if ok {
                 lastVideoSample = sampleBuffer
                 lastVideoPTS = sampleBuffer.presentationTimeStamp
+            }
+            if let w = writer, (!ok || w.status == .failed), !didSignalError {
+                didSignalError = true
+                delegate?.onError(w.error ?? RecordingError.recordingFailed("Camera video append failed"))
             }
         }
     }
 
     private func handleAudioSample(_ sampleBuffer: CMSampleBuffer) {
         // 仅在会话已启动后写入音频；若音频先到，直接丢弃以避免未 startSession 时 append 触发崩溃。
-        guard acceptingSamples, writerSessionStarted, let aIn = audioInput, aIn.isReadyForMoreMediaData, writer?.status == .writing else { return }
-        _ = aIn.append(sampleBuffer)
+        guard acceptingSamples, writerSessionStarted, let aIn = audioInput, aIn.isReadyForMoreMediaData, writer?.status == .writing else {
+            if let w = writer, w.status == .failed, !didSignalError {
+                didSignalError = true
+                delegate?.onError(w.error ?? RecordingError.recordingFailed("Camera audio writer failed"))
+            }
+            return
+        }
+        let ok = aIn.append(sampleBuffer)
+        if let w = writer, (!ok || w.status == .failed), !didSignalError {
+            didSignalError = true
+            delegate?.onError(w.error ?? RecordingError.recordingFailed("Camera audio append failed"))
+        }
     }
 
     private func appendFinalKeepaliveIfNeeded() {
@@ -214,5 +241,35 @@ final class AssetWriterCamBackend: CameraBackend {
                 _ = input.append(dup)
             }
         }
+    }
+}
+
+// MARK: - Observers → onError
+extension AssetWriterCamBackend {
+    private func installObservers(for session: AVCaptureSession) {
+        let nc = NotificationCenter.default
+        let o1 = nc.addObserver(forName: .AVCaptureSessionWasInterrupted, object: session, queue: nil) { [weak self] _ in
+            self?.delegate?.onError(RecordingError.recordingFailed("Camera session interrupted"))
+        }
+        let o2 = nc.addObserver(forName: .AVCaptureSessionRuntimeError, object: session, queue: nil) { [weak self] note in
+            if let err = note.userInfo?[AVCaptureSessionErrorKey] as? Error {
+                self?.delegate?.onError(err)
+            } else {
+                self?.delegate?.onError(RecordingError.recordingFailed("Camera runtime error"))
+            }
+        }
+        let o3 = nc.addObserver(forName: .AVCaptureDeviceWasDisconnected, object: nil, queue: nil) { [weak self] n in
+            guard let self else { return }
+            guard let dev = n.object as? AVCaptureDevice else { return }
+            if dev.uniqueID == self.observedDeviceID {
+                self.delegate?.onError(RecordingError.recordingFailed("Camera disconnected"))
+            }
+        }
+        observers = [o1, o2, o3]
+    }
+    private func removeObservers() {
+        let nc = NotificationCenter.default
+        observers.forEach { nc.removeObserver($0) }
+        observers.removeAll()
     }
 }

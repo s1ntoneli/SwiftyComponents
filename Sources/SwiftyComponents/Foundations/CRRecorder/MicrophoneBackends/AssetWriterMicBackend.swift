@@ -8,6 +8,8 @@ final class AssetWriterMicBackend: MicrophoneBackend {
     private weak var session: AVCaptureSession?
     private weak var delegate: CaptureRecordingDelegate?
     private var audioDataOutput: AVCaptureAudioDataOutput?
+    private var observers: [Any] = []
+    private var observedDeviceID: String?
 
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
@@ -16,10 +18,12 @@ final class AssetWriterMicBackend: MicrophoneBackend {
 
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var acceptingSamples = true
+    private var didSignalError = false
 
     func configure(session: AVCaptureSession, device: AVCaptureDevice, delegate: CaptureRecordingDelegate, queue: DispatchQueue) throws {
         self.session = session
         self.delegate = delegate
+        self.observedDeviceID = device.uniqueID
 
         let dataOut = AVCaptureAudioDataOutput()
         guard session.canAddOutput(dataOut) else { throw RecordingError.cannotAddOutput }
@@ -30,6 +34,9 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         delegate.onAudioSample = { [weak self] sampleBuffer in
             self?.handleSample(sampleBuffer)
         }
+
+        // 内部监听设备/会话状态变化：仅用于转发错误并让上层终止，不做自动重连
+        installObservers(for: session)
     }
 
     func start(fileURL: URL) async throws {
@@ -49,7 +56,10 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         input.expectsMediaDataInRealTime = true
         guard writer.canAdd(input) else { throw RecordingError.outputNotConfigured }
         writer.add(input)
-        guard writer.startWriting() else { throw writer.error ?? RecordingError.outputNotConfigured }
+        guard writer.startWriting() else {
+            if let e = writer.error { delegate?.onError(e) }
+            throw writer.error ?? RecordingError.outputNotConfigured
+        }
 
         self.writer = writer
         self.input = input
@@ -68,6 +78,7 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         input?.markAsFinished()
         if let writer { await writer.finishWriting() }
         AVCaptureSessionHelper.stopRecordingStep2Close(avSession: session)
+        removeObservers()
         return fileURL
     }
 
@@ -75,6 +86,11 @@ final class AssetWriterMicBackend: MicrophoneBackend {
     private var agcSmoothedGain: Float = 1.0
     private func handleSample(_ sampleBuffer: CMSampleBuffer) {
         guard acceptingSamples, let writer, let input else { return }
+        if writer.status == .failed, !didSignalError {
+            didSignalError = true
+            delegate?.onError(writer.error ?? RecordingError.recordingFailed("Audio writer failed"))
+            return
+        }
         let pts = sampleBuffer.presentationTimeStamp
         if !writerSessionStarted {
             writer.startSession(atSourceTime: pts)
@@ -83,16 +99,34 @@ final class AssetWriterMicBackend: MicrophoneBackend {
             startContinuation?.resume(returning: ())
             startContinuation = nil
         }
-        guard input.isReadyForMoreMediaData, writer.status == .writing else { return }
+        guard input.isReadyForMoreMediaData, writer.status == .writing else {
+            if writer.status == .failed, !didSignalError {
+                didSignalError = true
+                delegate?.onError(writer.error ?? RecordingError.recordingFailed("Audio writer failed"))
+            }
+            return
+        }
 
         if processingOptions.enableProcessing || processingOptions.linearGain != 1.0 {
             if let processed = process(sampleBuffer) {
-                _ = input.append(processed)
+                let ok = input.append(processed)
+                if !ok, writer.status == .failed, !didSignalError {
+                    didSignalError = true
+                    delegate?.onError(writer.error ?? RecordingError.recordingFailed("Audio append failed"))
+                }
             } else {
-                _ = input.append(sampleBuffer)
+                let ok = input.append(sampleBuffer)
+                if !ok, writer.status == .failed, !didSignalError {
+                    didSignalError = true
+                    delegate?.onError(writer.error ?? RecordingError.recordingFailed("Audio append failed"))
+                }
             }
         } else {
-            _ = input.append(sampleBuffer)
+            let ok = input.append(sampleBuffer)
+            if !ok, writer.status == .failed, !didSignalError {
+                didSignalError = true
+                delegate?.onError(writer.error ?? RecordingError.recordingFailed("Audio append failed"))
+            }
         }
     }
 
@@ -232,5 +266,33 @@ final class AssetWriterMicBackend: MicrophoneBackend {
             return nil
         }
         return newSampleUnwrapped
+    }
+
+    // MARK: - Observers → onError
+    private func installObservers(for session: AVCaptureSession) {
+        let nc = NotificationCenter.default
+        let o1 = nc.addObserver(forName: .AVCaptureSessionWasInterrupted, object: session, queue: nil) { [weak self] note in
+            self?.delegate?.onError(RecordingError.recordingFailed("Microphone session interrupted"))
+        }
+        let o2 = nc.addObserver(forName: .AVCaptureSessionRuntimeError, object: session, queue: nil) { [weak self] note in
+            if let err = note.userInfo?[AVCaptureSessionErrorKey] as? Error {
+                self?.delegate?.onError(err)
+            } else {
+                self?.delegate?.onError(RecordingError.recordingFailed("Microphone runtime error"))
+            }
+        }
+        let o3 = nc.addObserver(forName: .AVCaptureDeviceWasDisconnected, object: nil, queue: nil) { [weak self] n in
+            guard let self else { return }
+            guard let dev = n.object as? AVCaptureDevice else { return }
+            if dev.uniqueID == self.observedDeviceID {
+                self.delegate?.onError(RecordingError.recordingFailed("Microphone disconnected"))
+            }
+        }
+        observers = [o1, o2, o3]
+    }
+    private func removeObservers() {
+        let nc = NotificationCenter.default
+        observers.forEach { nc.removeObserver($0) }
+        observers.removeAll()
     }
 }

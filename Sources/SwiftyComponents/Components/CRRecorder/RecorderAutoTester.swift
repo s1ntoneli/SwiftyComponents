@@ -21,6 +21,8 @@ final class RecorderAutoTester: ObservableObject {
             case beforeFirstFrame
             case long60s
             case camMicBoth
+            /// 不限制时长，直到系统/用户外部打断（如 Control Center 停止共享）
+            case untilInterrupted
         }
         let id: Kind
         let title: String
@@ -78,7 +80,8 @@ final class RecorderAutoTester: ObservableObject {
             .init(id: .cursorOff, title: "隐藏光标", summary: "showsCursor=false 3s", defaultSeconds: 3),
             .init(id: .beforeFirstFrame, title: "首帧前停止", summary: "启动后立即停止，校验无崩溃", defaultSeconds: 0),
             .init(id: .long60s, title: "长时间 60s", summary: "录制60s，验证稳定性与时长", defaultSeconds: 60),
-            .init(id: .camMicBoth, title: "摄像头+麦克风", summary: "强制同时录制摄像头和麦克风，3s", defaultSeconds: 3)
+            .init(id: .camMicBoth, title: "摄像头+麦克风", summary: "强制同时录制摄像头和麦克风，3s", defaultSeconds: 3),
+            .init(id: .untilInterrupted, title: "直到系统打断", summary: "不设时长，等待系统/用户停止共享后收尾并统计关键数据", defaultSeconds: 0)
         ]
     }
 
@@ -167,6 +170,53 @@ final class RecorderAutoTester: ObservableObject {
             // 尝试通过菜单栏“停止共享”结束（需要辅助功能权限）
             try? await Task.sleep(nanoseconds: UInt64(max(0.1, seconds) * 1_000_000_000))
             try? await Self.menuBarStopSharing()
+        case .untilInterrupted:
+            // 不主动停止：等待系统/用户从外部停止共享（SCStream -3821）
+            // 通过 CRRecorder.onInterupt 回调触发收尾，并记录关键指标
+            let startWall = CFAbsoluteTimeGetCurrent()
+            let interrupted: (CRRecorder.Result?, Error) = await withCheckedContinuation { (cont: CheckedContinuation<(CRRecorder.Result?, Error), Never>) in
+                rec.onInterupt = { err in
+                    Task.detached(priority: .userInitiated) {
+                        let result = try? await rec.stopRecordingWithResult()
+                        cont.resume(returning: (result, err))
+                    }
+                }
+            }
+            let endWall = CFAbsoluteTimeGetCurrent()
+            // 汇总关键数据（来自 RecorderDiagnostics）
+            let diag = RecorderDiagnostics.shared
+            let sys = diag.systemSnapshot
+            let bytes = diag.currentFileSizeBytes
+            let noteLines: [String] = [
+                "外部中断: \((interrupted.1 as NSError).domain)#\((interrupted.1 as NSError).code) — \(interrupted.1.localizedDescription)",
+                String(format: "总耗时(墙钟): %.2fs", endWall - startWall),
+                "帧: captured=\(diag.capturedVideoFrames) appended=\(diag.appendedVideoFrames) dropped=\(diag.droppedVideoNotReady)",
+                String(format: "测量FPS: %.2f", diag.measuredFPS),
+                "写入状态: video=\(diag.lastVideoWriterStatus) audio=\(diag.lastAudioWriterStatus)",
+                "最终文件大小: \(bytes) bytes",
+                {
+                    if let s = sys {
+                        let cpu = s.systemCPUUsageRatio.map { String(format: "%.1f%%", $0 * 100) } ?? "-"
+                        let pcpu = s.processCPUPercent.map { String(format: "%.1f%%", $0) } ?? "-"
+                        let mem = String(format: "%.1f%%", (s.memoryUsageRatio * 100))
+                        return "系统: CPU=\(cpu) 进程CPU=\(pcpu) RSS=\(s.processRSSBytes)B 内存占用=\(mem)"
+                    } else { return "系统: n/a" }
+                }()
+            ]
+            let note = noteLines.joined(separator: "\n")
+            // 若能得到 result，进行文件校验；否则返回空 files
+            if let result = interrupted.0 {
+                var checks: [FileCheck] = []
+                for f in result.bundleInfo.files {
+                    let url = sessionDir.appendingPathComponent(f.filename)
+                    let asset = AVURLAsset(url: url)
+                    let dur = CMTimeGetSeconds(asset.duration)
+                    checks.append(FileCheck(filename: f.filename, expectedSeconds: -1, actualSeconds: dur, pass: true))
+                }
+                return RunResult(scenario: scenario, index: index, sessionDir: sessionDir, files: checks, passed: true, note: note)
+            } else {
+                return RunResult(scenario: scenario, index: index, sessionDir: sessionDir, files: [], passed: true, note: note)
+            }
         case .stress10, .shortQuick, .staticLong, .micOnly, .camOnly, .highFPS120, .lowFPS15, .hevcHDR, .noAudio, .cursorOn, .cursorOff, .long60s, .camMicBoth:
             try? await Task.sleep(nanoseconds: UInt64(max(0.1, seconds) * 1_000_000_000))
         case .beforeFirstFrame:

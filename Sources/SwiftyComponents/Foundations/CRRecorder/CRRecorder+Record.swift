@@ -52,6 +52,8 @@ class CRCameraRecording {
 
     // 手动切换后端：如需回退为文件输出，将下行替换为 FileOutputCamBackend()
     private let backend: CameraBackend = AssetWriterCamBackend()
+    private var isStopping: Bool = false
+    private var cachedAssets: [CRRecorder.BundleInfo.FileAsset]? = nil
 
     init() {
         print("📹 CRCameraRecording 初始化")
@@ -116,13 +118,23 @@ class CRCameraRecording {
     }
 
     func stop() async throws -> [CRRecorder.BundleInfo.FileAsset] {
+        if let cached = cachedAssets { return cached }
+        if isStopping {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            return cachedAssets ?? []
+        }
+        isStopping = true
+        defer { isStopping = false }
         print("🛑 停止摄像头录制")
         endTime = CFAbsoluteTimeGetCurrent()
         let url = try await backend.stop()
         if let s = session { AVCaptureSessionHelper.stopRecordingStep2Close(avSession: s) }
         if let url {
-            return [CRRecorder.BundleInfo.FileAsset(filename: url.lastPathComponent, tyle: .webcam, recordingStartTimestamp: startTime, recordingEndTimestamp: endTime)]
+            let assets = [CRRecorder.BundleInfo.FileAsset(filename: url.lastPathComponent, tyle: .webcam, recordingStartTimestamp: startTime, recordingEndTimestamp: endTime)]
+            cachedAssets = assets
+            return assets
         }
+        cachedAssets = []
         return []
     }
 
@@ -135,6 +147,8 @@ class CRCameraRecording {
         return []
     }
 }
+
+// no watchdogs or observers; rely on backend error callbacks
 
 class CRAppleDeviceRecording {
     var session: AVCaptureSession?
@@ -150,6 +164,8 @@ class CRAppleDeviceRecording {
     // 复用相机后端（FileOutput 或 AssetWriter），默认 FileOutput
     private let backend: CameraBackend = AssetWriterCamBackend()
     var options: CameraRecordingOptions = .init()
+    private var isStopping: Bool = false
+    private var cachedAssets: [CRRecorder.BundleInfo.FileAsset]? = nil
 
     init() {
         NSLog("📹 CRAppleDeviceRecording 初始化")
@@ -199,13 +215,23 @@ class CRAppleDeviceRecording {
     }
 
     func stop() async throws -> [CRRecorder.BundleInfo.FileAsset] {
+        if let cached = cachedAssets { return cached }
+        if isStopping {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            return cachedAssets ?? []
+        }
+        isStopping = true
+        defer { isStopping = false }
         NSLog("🛑 停止AppleDevice录制")
         endTime = CFAbsoluteTimeGetCurrent()
         let url = try await backend.stop()
         if let s = session { AVCaptureSessionHelper.stopRecordingStep2Close(avSession: s) }
         if let url {
-            return [CRRecorder.BundleInfo.FileAsset(filename: url.lastPathComponent, tyle: .appleDevice, recordingStartTimestamp: startTime, recordingEndTimestamp: endTime)]
+            let assets = [CRRecorder.BundleInfo.FileAsset(filename: url.lastPathComponent, tyle: .appleDevice, recordingStartTimestamp: startTime, recordingEndTimestamp: endTime)]
+            cachedAssets = assets
+            return assets
         }
+        cachedAssets = []
         return []
     }
 
@@ -232,12 +258,17 @@ class CRMicrophoneRecording {
     // 手动切换后端：如需回退为文件输出，将下行替换为 FileOutputMicBackend()
     private let backend: MicrophoneBackend = AssetWriterMicBackend()
     var processingOptions: MicrophoneProcessingOptions = .init()
+    // 外部中断/错误回调（供 CRRecorder 注入）；不使用观察者/看门狗
+    var onError: (Error) -> Void = { _ in }
+    private var isStopping: Bool = false
+    private var cachedAssets: [CRRecorder.BundleInfo.FileAsset]? = nil
 
     init() {
         print("🎤 CRMicrophoneRecording 初始化")
         delegate.audioLevelHandler = { [unowned self] level, peakLevel in
             audioLevelHandler?(level, peakLevel)
         }
+        delegate.onError = { [unowned self] err in onError(err) }
     }
 
     func prepare(microphoneID: String) async throws {
@@ -289,13 +320,23 @@ class CRMicrophoneRecording {
     }
 
     func stop() async throws -> [CRRecorder.BundleInfo.FileAsset] {
+        if let cached = cachedAssets { return cached }
+        if isStopping {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            return cachedAssets ?? []
+        }
+        isStopping = true
+        defer { isStopping = false }
         print("🛑 停止麦克风录制")
         endTime = CFAbsoluteTimeGetCurrent()
         let url = try await backend.stop()
         if let s = session { AVCaptureSessionHelper.stopRecordingStep2Close(avSession: s) }
         if let url {
-            return [CRRecorder.BundleInfo.FileAsset(filename: url.lastPathComponent, tyle: .audio, recordingStartTimestamp: startTime, recordingEndTimestamp: endTime)]
+            let assets = [CRRecorder.BundleInfo.FileAsset(filename: url.lastPathComponent, tyle: .audio, recordingStartTimestamp: startTime, recordingEndTimestamp: endTime)]
+            cachedAssets = assets
+            return assets
         }
+        cachedAssets = []
         return []
     }
 
@@ -308,6 +349,8 @@ class CRMicrophoneRecording {
         return []
     }
 }
+
+// 不使用看门狗；依赖后端在错误发生时通过 delegate.onError 回调
 
 class AVCaptureSessionHelper {
     

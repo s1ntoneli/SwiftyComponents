@@ -35,6 +35,10 @@ public class CRRecorder: @unchecked Sendable {
     // Per-run camera options (resolution/codec/bitrate clamp)
     public var cameraOptions: CameraRecordingOptions = .init()
 
+    // Idempotent stopping guards（标记位方案）
+    private var isStoppingAll: Bool = false
+    private var stopAllCachedResult: Result? = nil
+
     public init(_ schemes: [SchemeItem], outputDirectory: URL) {
         self.schemes = schemes
         self.outputDirectory = outputDirectory
@@ -83,6 +87,10 @@ public class CRRecorder: @unchecked Sendable {
                 microphoneRecording.audioLevelHandler = { [weak self] level, peak in
                     self?.audioLevelSubject.send(level)
                 }
+                microphoneRecording.onError = { [weak self] err in
+                    NSLog("🎤 [CR_RECORDER_MIC_ERROR] CRRecorder 接收到麦克风错误: %@", err.localizedDescription)
+                    self?.onInterupt(err)
+                }
                 // Apply per-run mic options
                 microphoneRecording.processingOptions = microphoneOptions
                 try await microphoneRecording.prepare(microphoneID: microphoneID)
@@ -92,6 +100,10 @@ public class CRRecorder: @unchecked Sendable {
                 print("[CRRecorder] 准备苹果设备录制 - 设备ID: \(appleDeviceID), 文件名: \(filename)")
                 let appleDeviceRecording = CRAppleDeviceRecording()
                 appleDeviceRecording.options = cameraOptions
+                appleDeviceRecording.onError = { err in
+                    NSLog("📱 [CR_RECORDER_APPLE_DEVICE_ERROR] CRRecorder 接收到 Apple 设备错误: %@", err.localizedDescription)
+                    self.onInterupt(err)
+                }
                 try await appleDeviceRecording.prepare(deviceId: appleDeviceID)
                 appleDeviceCaptures[appleDeviceID] = appleDeviceRecording
                 break
@@ -301,6 +313,21 @@ public class CRRecorder: @unchecked Sendable {
     
     
     public func stopRecordingWithResult() async throws -> Result {
+        if let cached = stopAllCachedResult { return cached }
+        if isStoppingAll {
+            // 简单等待一小段时间，给首个 stop 完成落盘
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            if let cached = stopAllCachedResult { return cached }
+        }
+        isStoppingAll = true
+        defer { isStoppingAll = false }
+        let res = try await _stopAllWithResultImpl()
+        stopAllCachedResult = res
+        return res
+    }
+
+    // Real stop implementation. Do not call directly; use stopRecordingWithResult().
+    private func _stopAllWithResultImpl() async throws -> Result {
         
         // 按设备类型分组
         let auxiliarySchemes = schemes.filter { scheme in
