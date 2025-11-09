@@ -94,6 +94,8 @@ public struct ScreenRecorderControl: View {
     // Auto tests
     @State private var showAutoTests: Bool = false
     @State private var autoTester = RecorderAutoTester()
+    // Docs
+    @State private var showDocs: Bool = false
 
     // MARK: - Init
     public init(
@@ -115,6 +117,8 @@ public struct ScreenRecorderControl: View {
                 Spacer()
                 Button("Diagnostics") { showDiagnostics = true }
                     .accessibilityIdentifier("CRRecorder.Diagnostics")
+                Button("Docs") { showDocs = true }
+                    .accessibilityIdentifier("CRRecorder.Docs")
                 Button("Auto Tests") { showAutoTests = true }
                     .accessibilityIdentifier("CRRecorder.AutoTests")
             }
@@ -363,6 +367,7 @@ public struct ScreenRecorderControl: View {
         }
         .padding()
         .sheet(isPresented: $showDiagnostics) { RecorderDiagnosticsView() }
+        .sheet(isPresented: $showDocs) { RecorderDocsPanel() }
         .sheet(isPresented: $showPlayer, onDismiss: { avPlayer?.pause() }) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(playerTitle).font(.headline).lineLimit(1).truncationMode(.middle)
