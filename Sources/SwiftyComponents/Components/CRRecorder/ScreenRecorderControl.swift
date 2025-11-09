@@ -19,16 +19,21 @@ public struct ScreenRecorderControl: View {
     public struct Configuration: Equatable, Sendable {
         public var displayID: CGDirectDisplayID
         public var cropRect: CGRect
+        /// Merge system audio into the screen recording
         public var captureSystemAudio: Bool
+        /// Record microphone in parallel as a separate `.m4a` file
+        public var includeMicrophone: Bool
 
         public init(
             displayID: CGDirectDisplayID = CGMainDisplayID(),
             cropRect: CGRect = CGRect(x: 0, y: 0, width: 200, height: 200),
-            captureSystemAudio: Bool = false
+            captureSystemAudio: Bool = false,
+            includeMicrophone: Bool = false
         ) {
             self.displayID = displayID
             self.cropRect = cropRect
             self.captureSystemAudio = captureSystemAudio
+            self.includeMicrophone = includeMicrophone
         }
     }
 
@@ -58,11 +63,18 @@ public struct ScreenRecorderControl: View {
     @State private var hdr: Bool = false
     @State private var queueDepthText: String = ""
     @State private var targetBitrateText: String = ""
+    // Persisted audio toggles
+    @AppStorage("CRDemo.IncludeSystemAudio") private var persistedSystemAudio: Bool = false
+    @AppStorage("CRDemo.IncludeMicrophone") private var persistedMicrophone: Bool = false
+    @AppStorage("CRDemo.SelectedMicrophoneID") private var persistedMicID: String = "default"
     // Content lists
     @State private var displays: [SCDisplay] = []
     @State private var windows: [SCWindow] = []
     @State private var selectedDisplayID: Int? = nil
     @State private var selectedWindowID: Int? = nil
+    // Microphones
+    @State private var microphones: [AVCaptureDevice] = []
+    @State private var selectedMicrophoneID: String? = nil
 
     // Keep a reference while recording
     @State private var recorder: CRRecorder? = nil
@@ -157,6 +169,34 @@ public struct ScreenRecorderControl: View {
                     .textFieldStyle(.roundedBorder)
             }
 
+            // Audio options (persisted)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    Toggle("System Audio", isOn: $persistedSystemAudio)
+                        .accessibilityIdentifier("CRRecorder.Toggle.SystemAudio")
+                    Toggle("Microphone", isOn: $persistedMicrophone)
+                        .accessibilityIdentifier("CRRecorder.Toggle.Microphone")
+                }
+                if persistedMicrophone {
+                    HStack(spacing: 8) {
+                        Text("Mic:")
+                        Picker("Microphone", selection: Binding(get: {
+                            selectedMicrophoneID ?? persistedMicID
+                        }, set: { newID in
+                            selectedMicrophoneID = newID
+                            persistedMicID = newID
+                        })) {
+                            Text("系统默认").tag("default")
+                            ForEach(microphones, id: \.uniqueID) { d in
+                                Text(d.localizedName).tag(d.uniqueID)
+                            }
+                        }
+                        .frame(minWidth: 220)
+                        .accessibilityIdentifier("CRRecorder.Picker.Microphone")
+                    }
+                }
+            }
+
             // Start / Stop controls
             HStack(spacing: 8) {
                 Button {
@@ -177,20 +217,34 @@ public struct ScreenRecorderControl: View {
                 .disabled(!isRecording || isBusy)
                 .accessibilityIdentifier("CRRecorder.Stop")
 
-                if isBusy {
-                    ProgressView().controlSize(.small)
-                }
-                // 测试阶段：以“按钮点击开始”的时间为基准显示内容时长
-                if let start = recordStartAt, isRecording {
-                    Text("内容时长: \(formatElapsed(since: start, now: tick))")
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("CRRecorder.ContentElapsed")
-                } else if isRecording {
-                    Text("内容时长: 00:00")
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("CRRecorder.ContentElapsed")
+                if isBusy { ProgressView().controlSize(.small) }
+
+                // 同时显示“点击计时”和“内容计时”两条信息
+                if isRecording {
+                    VStack(alignment: .leading, spacing: 2) {
+                        if let clickStart = recordStartAt {
+                            Text("点击时长: \(formatElapsed(since: clickStart, now: tick))")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("CRRecorder.ClickElapsed")
+                        } else {
+                            Text("点击时长: 00:00")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("CRRecorder.ClickElapsed")
+                        }
+                        if let contentStart = (contentFirstFrameAt ?? recordStartAt) {
+                            Text("内容时长: \(formatElapsed(since: contentStart, now: tick))")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("CRRecorder.ContentElapsed")
+                        } else {
+                            Text("内容时长: 00:00")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                                .accessibilityIdentifier("CRRecorder.ContentElapsed")
+                        }
+                    }
                 }
             }
 
@@ -262,7 +316,16 @@ public struct ScreenRecorderControl: View {
         .sheet(isPresented: $showDiagnostics) {
             RecorderDiagnosticsView()
         }
-        .onAppear { loadLogs() }
+        .onAppear {
+            // Prefill a timestamped name so users don't need to type
+            if fileName.isEmpty || !isRecording { fileName = Self.timestampedFilenamePrefix("capture") }
+            // Seed persisted toggles from configuration on first appear only
+            if configuration.captureSystemAudio && !persistedSystemAudio { persistedSystemAudio = true }
+            if configuration.includeMicrophone && !persistedMicrophone { persistedMicrophone = true }
+            reloadMicrophones()
+            if selectedMicrophoneID == nil { selectedMicrophoneID = persistedMicID }
+            loadLogs()
+        }
         .task { await reloadContent() }
         .onReceive(diag.$lastFrameWallTime) { t in
             if isRecording, contentFirstFrameAt == nil, let t { contentFirstFrameAt = t }
@@ -280,23 +343,35 @@ public struct ScreenRecorderControl: View {
         defer { isBusy = false }
         errorMessage = nil
 
-        // Build scheme
+        // Always generate a fresh timestamped base name
+        fileName = Self.timestampedFilenamePrefix("capture")
+
+        // Build primary scheme
         let scheme: CRRecorder.SchemeItem
         if mode == .window {
             guard let widInt = selectedWindowID ?? Int(windowIDText) else { errorMessage = "Please select a window"; return }
-            scheme = .window(displayId: 0, windowID: CGWindowID(widInt), hdr: hdr, captureSystemAudio: configuration.captureSystemAudio, filename: fileName)
+            scheme = .window(displayId: 0, windowID: CGWindowID(widInt), hdr: hdr, captureSystemAudio: (persistedSystemAudio || configuration.captureSystemAudio), filename: fileName)
         } else {
             let dispID: CGDirectDisplayID = selectedDisplayID.map { CGDirectDisplayID($0) } ?? configuration.displayID
-            scheme = .display(displayID: dispID, area: configuration.cropRect, hdr: hdr, captureSystemAudio: configuration.captureSystemAudio, filename: fileName, excludedWindowTitles: [])
+            scheme = .display(displayID: dispID, area: configuration.cropRect, hdr: hdr, captureSystemAudio: (persistedSystemAudio || configuration.captureSystemAudio), filename: fileName, excludedWindowTitles: [])
         }
 
-        let rec = CRRecorder([scheme], outputDirectory: outputDirectory)
+        // Build full schemes list (microphone optional)
+        var schemes: [CRRecorder.SchemeItem] = [scheme]
+        if persistedMicrophone || configuration.includeMicrophone {
+            // Use default microphone; save as separate audio file with -mic suffix
+            let micName = fileName + "-mic"
+            let micID = selectedMicrophoneID ?? persistedMicID
+            schemes.append(.microphone(microphoneID: micID.isEmpty ? "default" : micID, filename: micName))
+        }
+
+        let rec = CRRecorder(schemes, outputDirectory: outputDirectory)
         // Pass options
         var opts = ScreenRecorderOptions(
             fps: fps,
             queueDepth: Int(queueDepthText),
             targetBitRate: Int(targetBitrateText),
-            includeAudio: configuration.captureSystemAudio,
+            includeAudio: (persistedSystemAudio || configuration.captureSystemAudio),
             showsCursor: showsCursor,
             hdr: hdr,
             useHEVC: useHEVC
@@ -307,7 +382,7 @@ public struct ScreenRecorderControl: View {
         }
 
         do {
-            try await rec.prepare([scheme])
+            try await rec.prepare(schemes)
             try await rec.startRecording()
             recorder = rec
             isRecording = true
@@ -383,6 +458,14 @@ public struct ScreenRecorderControl: View {
         guard let last = lastSavedFiles.last else { return }
         let url = outputDirectory.appendingPathComponent(last)
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    private func reloadMicrophones() {
+        #if os(macOS)
+        microphones = AVCaptureDevice.devices(for: .audio)
+        #else
+        microphones = AVCaptureDevice.DiscoverySession(deviceTypes: [.builtInMicrophone], mediaType: .audio, position: .unspecified).devices
+        #endif
     }
 
     private func handleInterruption(_ err: Error) {
