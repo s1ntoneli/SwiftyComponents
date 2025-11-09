@@ -131,6 +131,10 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         out.onAudio = { [weak self] sample in
             guard let self else { return }
             guard self.allowAppend else { return }
+            // Audio frames may arrive before the first video frame.
+            // To avoid AVAssetWriter "Must start a session" crash, ignore audio
+            // until the writer session is started by the first video sample.
+            guard self.writer?.didStartSession == true else { return }
             self.writer?.appendAudio(sample)
         }
         out.onError = { [weak self] error in

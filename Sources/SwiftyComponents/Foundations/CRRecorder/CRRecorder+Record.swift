@@ -220,6 +220,7 @@ class CRMicrophoneRecording {
 
     // 手动切换后端：如需回退为文件输出，将下行替换为 FileOutputMicBackend()
     private let backend: MicrophoneBackend = AssetWriterMicBackend()
+    var processingOptions: MicrophoneProcessingOptions = .init()
 
     init() {
         print("🎤 CRMicrophoneRecording 初始化")
@@ -249,6 +250,7 @@ class CRMicrophoneRecording {
         session.addInput(input)
         session.commitConfiguration()
 
+        backend.processingOptions = processingOptions
         try backend.configure(session: session, device: device, delegate: delegate, queue: queue)
 
         session.startRunning()
@@ -265,6 +267,7 @@ class CRMicrophoneRecording {
         guard session?.isRunning == true else { throw RecordingError.sessionNotRunning }
 
         self.startURL = fileURL
+        backend.processingOptions = processingOptions
         backend.onFirstPTS = { [weak self] time in self?.startTime = time.seconds }
         try await backend.start(fileURL: fileURL)
     }

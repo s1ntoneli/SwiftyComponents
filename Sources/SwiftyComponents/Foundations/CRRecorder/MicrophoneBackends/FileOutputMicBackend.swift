@@ -3,6 +3,7 @@ import AVFoundation
 
 final class FileOutputMicBackend: MicrophoneBackend {
     var onFirstPTS: ((CMTime) -> Void)?
+    var processingOptions: MicrophoneProcessingOptions = .init()
 
     private weak var session: AVCaptureSession?
     private weak var delegate: CaptureRecordingDelegate?
@@ -67,4 +68,3 @@ final class FileOutputMicBackend: MicrophoneBackend {
         }
     }
 }
-

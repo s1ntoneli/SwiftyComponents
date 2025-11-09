@@ -30,6 +30,9 @@ public class CRRecorder: @unchecked Sendable {
     var resultSubject: PassthroughSubject<Result, Error> = .init()
     public var audioLevelSubject: PassthroughSubject<Float, Never> = .init()
     
+    // Per-run microphone processing options (default disabled; mono channels=1)
+    public var microphoneOptions: MicrophoneProcessingOptions = .init()
+
     public init(_ schemes: [SchemeItem], outputDirectory: URL) {
         self.schemes = schemes
         self.outputDirectory = outputDirectory
@@ -77,6 +80,8 @@ public class CRRecorder: @unchecked Sendable {
                 microphoneRecording.audioLevelHandler = { [weak self] level, peak in
                     self?.audioLevelSubject.send(level)
                 }
+                // Apply per-run mic options
+                microphoneRecording.processingOptions = microphoneOptions
                 try await microphoneRecording.prepare(microphoneID: microphoneID)
                 microphoneCaptures[microphoneID] = microphoneRecording
                 break
