@@ -70,7 +70,7 @@ struct WaveformDemoView: View {
         .task(id: (selection?.id ?? audioName) + style.rawValue) { await load() }
         .toolbar { toolbar }
         .onAppear { if style == .outlineSmooth { smoothEnabled = true } }
-        .modifier(InspectorCompat(isPresented: $showInspector) { inspectorContent })
+        .demoInspector(isPresented: $showInspector) { inspectorContent }
         .padding()
     }
 
@@ -263,27 +263,5 @@ extension WaveformDemoView {
             }
         }
         .padding()
-    }
-}
-
-// MARK: - Inspector Compatibility Modifier
-private struct InspectorCompat<InspectorContent: View>: ViewModifier {
-    @Binding var isPresented: Bool
-    let content: () -> InspectorContent
-
-    func body(content host: Content) -> some View {
-        #if os(macOS)
-        if #available(macOS 13.0, *) {
-            host.inspector(isPresented: $isPresented, content: self.content)
-        } else {
-            host.sheet(isPresented: $isPresented, content: self.content)
-        }
-        #else
-        if #available(iOS 16.0, *) {
-            host.inspector(isPresented: $isPresented, content: self.content)
-        } else {
-            host.sheet(isPresented: $isPresented, content: self.content)
-        }
-        #endif
     }
 }

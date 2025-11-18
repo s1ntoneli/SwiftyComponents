@@ -15,7 +15,7 @@ struct CatalogView: View {
     var body: some View {
         NavigationStack(path: $path) {
             content
-                .navigationTitle("组件目录")
+                .navigationTitle("Catalog.Title")
                 .searchable(text: $search)
                 .onAppear(perform: navigateIfNeeded)
         }

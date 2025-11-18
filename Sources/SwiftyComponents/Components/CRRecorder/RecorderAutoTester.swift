@@ -91,6 +91,9 @@ final class RecorderAutoTester: ObservableObject {
         results.removeAll()
         defer { isRunning = false }
 
+        // Log run header for easier automation parsing
+        logAutoTest("START scenarios=\(config.scenarios.count) reps=\(config.repetitions) secondsOverride=\(config.secondsOverride?.description ?? "nil") systemAudio=\(config.includeSystemAudio) mic=\(config.includeMicrophone) cam=\(config.includeCamera) display=\(config.displayID) crop=\(config.cropRect?.debugDescription ?? "nil") base=\(config.baseOutput.path)")
+
         var counter = 0
         for scenario in config.scenarios {
             let reps = scenario.id == .stress10 ? max(config.repetitions, 10) : config.repetitions
@@ -100,13 +103,19 @@ final class RecorderAutoTester: ObservableObject {
                 do {
                     if let r = try await runOne(scenario: scenario, index: i, config: config) {
                         results.append(r)
+                        logRunResult(r)
                     }
                 } catch {
                     let dir = config.baseOutput
-                    results.append(RunResult(scenario: scenario, index: i, sessionDir: dir, files: [], passed: false, note: error.localizedDescription))
+                    let failed = RunResult(scenario: scenario, index: i, sessionDir: dir, files: [], passed: false, note: error.localizedDescription)
+                    results.append(failed)
+                    logRunResult(failed)
                 }
             }
         }
+
+        // Final summary
+        logSummary()
     }
 
     private func runOne(scenario: Scenario, index: Int, config: RunConfig) async throws -> RunResult? {
@@ -140,6 +149,9 @@ final class RecorderAutoTester: ObservableObject {
         if wantCam { schemes.append(.camera(cameraID: "default", filename: dirName + "-cam")) }
 
         let rec = CRRecorder(schemes, outputDirectory: sessionDir)
+        // 捕获屏幕流错误，用于失败时标注具体原因
+        var lastStreamError: NSError? = nil
+        rec.onInterupt = { err in lastStreamError = err as NSError }
         var opts = ScreenRecorderOptions(
             fps: 60,
             queueDepth: nil,
@@ -160,6 +172,9 @@ final class RecorderAutoTester: ObservableObject {
         rec.screenOptions = opts
         try await rec.prepare(schemes)
         try await rec.startRecording()
+
+        // 基线诊断快照（用于本轮统计增量）
+        let diagBefore = diagSnapshot()
 
         let seconds = config.secondsOverride ?? scenario.defaultSeconds
         let start = CFAbsoluteTimeGetCurrent()
@@ -210,7 +225,7 @@ final class RecorderAutoTester: ObservableObject {
                 for f in result.bundleInfo.files {
                     let url = sessionDir.appendingPathComponent(f.filename)
                     let asset = AVURLAsset(url: url)
-                    let dur = CMTimeGetSeconds(asset.duration)
+                    let dur = (try? await asset.load(.duration)).map { CMTimeGetSeconds($0) } ?? 0
                     checks.append(FileCheck(filename: f.filename, expectedSeconds: -1, actualSeconds: dur, pass: true))
                 }
                 return RunResult(scenario: scenario, index: index, sessionDir: sessionDir, files: checks, passed: true, note: note)
@@ -233,8 +248,9 @@ final class RecorderAutoTester: ObservableObject {
         for f in result.bundleInfo.files {
             let url = sessionDir.appendingPathComponent(f.filename)
             let asset = AVURLAsset(url: url)
-            // 采用更稳健的加载（避免直接读取 .duration 的过期 API 提示）
-            let dur = CMTimeGetSeconds(asset.duration)
+            // 更稳健地加载时长（避免直接读取 .duration 的潜在不稳定）
+            let durTime = try? await asset.load(.duration)
+            let dur = durTime.map { CMTimeGetSeconds($0) } ?? 0
             let tolerance: Double = {
                 switch scenario.id {
                 case .shortQuick, .stress10, .beforeFirstFrame: return 1.5
@@ -247,13 +263,120 @@ final class RecorderAutoTester: ObservableObject {
         }
 
         let allPass = checks.allSatisfy { $0.pass }
-        let note = "耗时: \(String(format: "%.2f", end - start))s"
+        var note = "耗时: \(String(format: "%.2f", end - start))s"
+
+        // 输出本轮关键统计增量（帮助定位“缩短/截断”原因）
+        let diagAfter = diagSnapshot()
+        logAutoTestStats(scenario: scenario, index: index, before: diagBefore, after: diagAfter)
+
+        // 若失败，拼接明确原因到 note
+        if !allPass {
+            if let rsn = formatFailReason(scenario: scenario, before: diagBefore, after: diagAfter, streamError: lastStreamError) {
+                note += "\n原因: " + rsn
+            }
+        }
         return RunResult(scenario: scenario, index: index, sessionDir: sessionDir, files: checks, passed: allPass, note: note)
     }
 
     private static func timestamped(_ base: String) -> String {
         let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         return base + "-" + df.string(from: Date())
+    }
+}
+
+// MARK: - Logging helpers
+extension RecorderAutoTester {
+    /// Print to both RecorderDiagnostics flow and NSLog with a stable prefix
+    private func logAutoTest(_ message: String) {
+        let msg = "[AUTO_TEST] " + message
+        // Route via diagnostics flow (visible in UI and, in DEBUG, console)
+        RecorderDiagnostics.shared.logFlow(msg)
+        // Always print to system log for parsing irrespective of build flags
+        NSLog("%@", msg)
+    }
+
+    private func logRunResult(_ r: RunResult) {
+        let header = "scenario=\(r.scenario.id.rawValue) index=\(r.index) passed=\(r.passed) note=\(r.note) dir=\(r.sessionDir.lastPathComponent)"
+        logAutoTest("RESULT " + header)
+        if r.files.isEmpty {
+            logAutoTest("FILES 0")
+        } else {
+            for f in r.files {
+                let actual = String(format: "%.2f", f.actualSeconds)
+                let line = "FILE name=\(f.filename) expected=\(Int(f.expectedSeconds))s actual=\(actual)s pass=\(f.pass)"
+                logAutoTest(line)
+            }
+        }
+    }
+
+    private func logSummary() {
+        let total = results.count
+        let passed = results.filter { $0.passed }.count
+        let failed = total - passed
+        logAutoTest("END total=\(total) passed=\(passed) failed=\(failed)")
+    }
+
+    // 采样当前诊断数据（读主线程，避免竞态）
+    private func diagSnapshot() -> (cv: UInt64, av: UInt64, dv: UInt64, aa: UInt64, vf: UInt64, err: Int, lastV: String, lastA: String) {
+        let d = RecorderDiagnostics.shared
+        return (cv: d.capturedVideoFrames,
+                av: d.appendedVideoFrames,
+                dv: d.droppedVideoNotReady,
+                aa: d.appendedAudioSamples,
+                vf: d.writerVideoFailedCount,
+                err: d.errors.count,
+                lastV: d.lastVideoWriterStatus,
+                lastA: d.lastAudioWriterStatus)
+    }
+
+    private func logAutoTestStats(scenario: Scenario, index: Int,
+                                  before: (cv: UInt64, av: UInt64, dv: UInt64, aa: UInt64, vf: UInt64, err: Int, lastV: String, lastA: String),
+                                  after:  (cv: UInt64, av: UInt64, dv: UInt64, aa: UInt64, vf: UInt64, err: Int, lastV: String, lastA: String)) {
+        let dcv = Int64(after.cv) - Int64(before.cv)
+        let dav = Int64(after.av) - Int64(before.av)
+        let dda = Int64(after.aa) - Int64(before.aa)
+        let ddv = Int64(after.dv) - Int64(before.dv)
+        let dvf = Int64(after.vf) - Int64(before.vf)
+        let derr = after.err - before.err
+        logAutoTest("STATS scenario=\(scenario.id.rawValue) index=\(index) video{captured=\(dcv) appended=\(dav) dropped=\(ddv)} audio{appended=\(dda)} writer{videoFailed+=\(dvf) lastV=\(after.lastV) lastA=\(after.lastA)} errors+=\(derr)")
+        if derr > 0 {
+            // 打印最近的错误摘要（末尾 N 条）
+            let errs = RecorderDiagnostics.shared.errors.suffix(derr)
+            for e in errs {
+                logAutoTest("ERROR domain=\(e.domain) code=\(e.code) msg=\(e.message)")
+            }
+        }
+    }
+
+    // 失败原因归纳
+    private func formatFailReason(
+        scenario: Scenario,
+        before: (cv: UInt64, av: UInt64, dv: UInt64, aa: UInt64, vf: UInt64, err: Int, lastV: String, lastA: String),
+        after:  (cv: UInt64, av: UInt64, dv: UInt64, aa: UInt64, vf: UInt64, err: Int, lastV: String, lastA: String),
+        streamError: NSError?
+    ) -> String? {
+        var reasons: [String] = []
+        let dcv = Int64(after.cv) - Int64(before.cv)
+        let dav = Int64(after.av) - Int64(before.av)
+        let ddv = Int64(after.dv) - Int64(before.dv)
+        let dvf = Int64(after.vf) - Int64(before.vf)
+        let derr = after.err - before.err
+        if let e = streamError {
+            reasons.append("流错误 \(e.domain)#\(e.code) \(e.localizedDescription)")
+        }
+        if after.lastV == "failed" || dvf > 0 {
+            reasons.append("写入失败(AVAssetWriter) 次数+=\(dvf)")
+        }
+        if ddv > 0 {
+            reasons.append("视频背压/未就绪 dropped+=\(ddv) captured+=\(dcv) appended+=\(dav)")
+        }
+        if derr > 0 && streamError == nil {
+            // 最近的错误（非 onInterupt 回调）
+            if let last = RecorderDiagnostics.shared.errors.last {
+                reasons.append("错误 \(last.domain)#\(last.code) \(last.message)")
+            }
+        }
+        return reasons.isEmpty ? nil : reasons.joined(separator: "；")
     }
 }
 
