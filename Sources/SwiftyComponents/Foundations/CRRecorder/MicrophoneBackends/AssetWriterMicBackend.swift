@@ -15,6 +15,7 @@ final class AssetWriterMicBackend: MicrophoneBackend {
     private var input: AVAssetWriterInput?
     private var writerSessionStarted = false
     private var fileURL: URL?
+    private var deviceSampleRate: Double?
 
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var acceptingSamples = true
@@ -24,6 +25,15 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         self.session = session
         self.delegate = delegate
         self.observedDeviceID = device.uniqueID
+
+        // Cache the device's native sample rate for better compatibility with external microphones.
+        let activeFormat = device.activeFormat
+        let desc = activeFormat.formatDescription
+        if let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(desc) {
+            deviceSampleRate = asbdPtr.pointee.mSampleRate
+        } else {
+            deviceSampleRate = nil
+        }
 
         let dataOut = AVCaptureAudioDataOutput()
         guard session.canAddOutput(dataOut) else { throw RecordingError.cannotAddOutput }
@@ -44,16 +54,21 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         let writer = try AVAssetWriter(url: fileURL, fileType: .m4a)
         // 固定 10s 片段
         writer.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 600)
+        let sampleRate = deviceSampleRate ?? 48_000
         let ch = max(1, processingOptions.channels)
         let audioSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: 48000,
+            AVSampleRateKey: sampleRate,
+//            AVSampleRateKey: sampleRate,
             AVNumberOfChannelsKey: ch,
             AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
             AVEncoderBitRateKey: 192_000
         ]
         let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
         input.expectsMediaDataInRealTime = true
+        // Use linearGain as a simple per-track volume preference; keep processing in the writer to avoid manual PCM munging.
+        let preferredVolume = max(0.0, min(processingOptions.linearGain, 4.0))
+        input.preferredVolume = preferredVolume
         guard writer.canAdd(input) else { throw RecordingError.outputNotConfigured }
         writer.add(input)
         guard writer.startWriting() else {
@@ -107,26 +122,12 @@ final class AssetWriterMicBackend: MicrophoneBackend {
             return
         }
 
-        if processingOptions.enableProcessing || processingOptions.linearGain != 1.0 {
-            if let processed = process(sampleBuffer) {
-                let ok = input.append(processed)
-                if !ok, writer.status == .failed, !didSignalError {
-                    didSignalError = true
-                    delegate?.onError(writer.error ?? RecordingError.recordingFailed("Audio append failed"))
-                }
-            } else {
-                let ok = input.append(sampleBuffer)
-                if !ok, writer.status == .failed, !didSignalError {
-                    didSignalError = true
-                    delegate?.onError(writer.error ?? RecordingError.recordingFailed("Audio append failed"))
-                }
-            }
-        } else {
-            let ok = input.append(sampleBuffer)
-            if !ok, writer.status == .failed, !didSignalError {
-                didSignalError = true
-                delegate?.onError(writer.error ?? RecordingError.recordingFailed("Audio append failed"))
-            }
+        // For maximum compatibility with external microphones, avoid manual PCM processing
+        // and delegate resampling/mixing to AVAssetWriter.
+        let ok = input.append(sampleBuffer)
+        if !ok, writer.status == .failed, !didSignalError {
+            didSignalError = true
+            delegate?.onError(writer.error ?? RecordingError.recordingFailed("Audio append failed"))
         }
     }
 
