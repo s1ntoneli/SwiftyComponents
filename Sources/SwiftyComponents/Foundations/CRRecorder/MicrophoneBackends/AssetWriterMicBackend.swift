@@ -16,6 +16,7 @@ final class AssetWriterMicBackend: MicrophoneBackend {
     private var writerSessionStarted = false
     private var fileURL: URL?
     private var deviceSampleRate: Double?
+    private var deviceChannelCount: Int?
 
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var acceptingSamples = true
@@ -26,13 +27,16 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         self.delegate = delegate
         self.observedDeviceID = device.uniqueID
 
-        // Cache the device's native sample rate for better compatibility with external microphones.
+        // Cache the device's native format (sample rate / channels) for better compatibility with external microphones.
         let activeFormat = device.activeFormat
         let desc = activeFormat.formatDescription
         if let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(desc) {
-            deviceSampleRate = asbdPtr.pointee.mSampleRate
+            let asbd = asbdPtr.pointee
+            deviceSampleRate = asbd.mSampleRate
+            deviceChannelCount = Int(asbd.mChannelsPerFrame)
         } else {
             deviceSampleRate = nil
+            deviceChannelCount = nil
         }
 
         let dataOut = AVCaptureAudioDataOutput()
@@ -55,11 +59,11 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         // 固定 10s 片段
         writer.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 600)
         let sampleRate = deviceSampleRate ?? 48_000
-        let ch = max(1, processingOptions.channels)
+        // Follow the device's native channel count by default to avoid unintended downmix/upmix.
+        let ch = max(1, deviceChannelCount ?? 1)
         let audioSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
             AVSampleRateKey: sampleRate,
-//            AVSampleRateKey: sampleRate,
             AVNumberOfChannelsKey: ch,
             AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
             AVEncoderBitRateKey: 192_000
