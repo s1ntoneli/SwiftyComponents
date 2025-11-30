@@ -39,7 +39,9 @@ let scheme: CRRecorder.SchemeItem = .display(
     area: CGRect(x: 0, y: 0, width: 800, height: 600),
     hdr: false,
     captureSystemAudio: false,
-    filename: filename
+    filename: filename,
+    backend: .screenCaptureKit,
+    excludedWindowTitles: []
 )
 
 // 3) 创建并配置 CRRecorder
@@ -73,7 +75,7 @@ print("Saved files:", result.bundleInfo.files.map(\_.filename))
 - 通过向 `CRRecorder` 传入多个 `SchemeItem` 并行录制：
 ```swift
 let schemes: [CRRecorder.SchemeItem] = [
-  .display(displayID: CGMainDisplayID(), area: nil, hdr: false, captureSystemAudio: false, filename: "screen"),
+  .display(displayID: CGMainDisplayID(), area: nil, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: []),
   .microphone(microphoneID: "default", filename: "mic"),
   .camera(cameraID: "default", filename: "webcam")
 ]
@@ -148,4 +150,3 @@ let result = try await recorder.stopRecordingWithResult()
 - Demo 页面：`Examples/SwiftyComponentsExamples/SwiftyComponentsExamples/Scenes/CRRecorderDemoView.swift`
 
 以上内容覆盖了从入门到异常处理的主要用法。如需更细致的扩展（例如 UI 自动化测试策略、与主工程日志系统打通），可在此文档基础上补充你的团队约定。
-

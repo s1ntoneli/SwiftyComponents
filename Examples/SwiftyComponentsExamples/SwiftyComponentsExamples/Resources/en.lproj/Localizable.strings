@@ -90,3 +90,6 @@
 "Catalog.MicRawReplay.Summary" = "Export WAV from mic-*.raw.pcm for offline reproduction";
 "Catalog.WaveformDemo.Title" = "Waveform View Demo";
 "Catalog.WaveformDemo.Summary" = "Preview waveform styles with bundled audio samples";
+
+"Catalog.AVScreenRecorderDemo.Title" = "AV Screen Recorder Demo";
+"Catalog.AVScreenRecorderDemo.Summary" = "Record screen using AVCaptureScreenInput as a traditional fallback";

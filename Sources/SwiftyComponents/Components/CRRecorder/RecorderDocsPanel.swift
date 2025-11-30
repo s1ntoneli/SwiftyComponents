@@ -47,7 +47,7 @@ struct RecorderDocsPanel: View {
             let displayID = CGMainDisplayID()
             let crop = CGRect(x: 0, y: 0, width: 800, height: 600)
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: crop, hdr: false, captureSystemAudio: false, filename: "screen", excludedWindowTitles: [])
+                .display(displayID: displayID, area: crop, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: [])
             ]
             
             let recorder = CRRecorder(schemes, outputDirectory: session)
@@ -62,7 +62,7 @@ struct RecorderDocsPanel: View {
             code: baseHeader + mkDirSnippet() + """
             let displayID = CGMainDisplayID()
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: true, filename: "screen", excludedWindowTitles: [])
+                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: true, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: [])
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
             recorder.screenOptions = .init(fps: 60, includeAudio: true, showsCursor: true)
@@ -77,7 +77,7 @@ struct RecorderDocsPanel: View {
             let content = try await SCShareableContent.current
             guard let win = content.windows.first else { throw NSError(domain: "Demo", code: -1) }
             let schemes: [CRRecorder.SchemeItem] = [
-                .window(displayId: 0, windowID: win.windowID, hdr: false, captureSystemAudio: false, filename: "window")
+                .window(displayId: 0, windowID: win.windowID, hdr: false, captureSystemAudio: false, filename: "window", backend: .screenCaptureKit)
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
             recorder.screenOptions = .init(fps: 60, includeAudio: false)
@@ -90,7 +90,7 @@ struct RecorderDocsPanel: View {
             code: baseHeader + mkDirSnippet() + """
             let displayID = CGMainDisplayID()
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: false, filename: "screen", excludedWindowTitles: []),
+                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: []),
                 .microphone(microphoneID: "default", filename: "screen-mic")
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
@@ -104,7 +104,7 @@ struct RecorderDocsPanel: View {
             code: baseHeader + mkDirSnippet() + """
             let displayID = CGMainDisplayID()
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: false, filename: "screen", excludedWindowTitles: []),
+                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: []),
                 .camera(cameraID: "default", filename: "cam"),
                 .microphone(microphoneID: "default", filename: "mic")
             ]
@@ -119,7 +119,7 @@ struct RecorderDocsPanel: View {
             code: baseHeader + mkDirSnippet() + """
             let displayID = CGMainDisplayID()
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: nil, hdr: true, captureSystemAudio: true, filename: "screen-hdr", excludedWindowTitles: [])
+                .display(displayID: displayID, area: nil, hdr: true, captureSystemAudio: true, filename: "screen-hdr", backend: .screenCaptureKit, excludedWindowTitles: [])
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
             recorder.screenOptions = .init(fps: 60, includeAudio: true, showsCursor: true, hdr: true, useHEVC: true)

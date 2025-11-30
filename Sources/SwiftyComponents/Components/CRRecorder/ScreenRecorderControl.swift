@@ -56,7 +56,10 @@ public struct ScreenRecorderControl: View {
     @State private var logs: [RecordingLogItem] = []
     @State private var fileName: String = "capture"
     enum Mode: String, CaseIterable { case display = "Display", window = "Window" }
+    /// 显示器录制区域：全屏 or 配置的 cropRect
+    enum RegionMode: String, CaseIterable { case full = "Full", crop = "Area" }
     @State private var mode: Mode = .display
+    @State private var regionMode: RegionMode = .crop
     @State private var windowIDText: String = ""
     @State private var fps: Int = 60
     @State private var showsCursor: Bool = false
@@ -70,6 +73,11 @@ public struct ScreenRecorderControl: View {
     @AppStorage("CRDemo.SelectedMicrophoneID") private var persistedMicID: String = "default"
     @AppStorage("CRDemo.IncludeCamera") private var persistedCamera: Bool = false
     @AppStorage("CRDemo.SelectedCameraID") private var persistedCamID: String = "default"
+    private enum BackendChoice: String, CaseIterable {
+        case screenCaptureKit
+        case avFoundation
+    }
+    @AppStorage("CRDemo.ScreenBackend") private var persistedBackend: String = BackendChoice.screenCaptureKit.rawValue
     // Content lists
     @State private var displays: [SCDisplay] = []
     @State private var windows: [SCWindow] = []
@@ -164,6 +172,15 @@ public struct ScreenRecorderControl: View {
                     }
                     .frame(width: 240)
                 }
+                HStack(spacing: 8) {
+                    Text("Region:")
+                    Picker("Region", selection: $regionMode) {
+                        Text("Full").tag(RegionMode.full)
+                        Text("Area").tag(RegionMode.crop)
+                    }
+                    .pickerStyle(.segmented)
+                    .help("Full = whole display, Area = use configuration.cropRect (\(Int(configuration.cropRect.width))x\(Int(configuration.cropRect.height)))")
+                }
             } else {
                 HStack(spacing: 8) {
                     Text("Window:")
@@ -236,6 +253,18 @@ public struct ScreenRecorderControl: View {
                         .frame(minWidth: 220)
                         .accessibilityIdentifier("CRRecorder.Picker.Camera")
                     }
+                }
+                HStack(spacing: 8) {
+                    Text("Backend:")
+                    Picker("Backend", selection: Binding(
+                        get: { BackendChoice(rawValue: persistedBackend) ?? .screenCaptureKit },
+                        set: { persistedBackend = $0.rawValue }
+                    )) {
+                        Text("ScreenCaptureKit").tag(BackendChoice.screenCaptureKit)
+                        Text("AVCapture (Legacy)").tag(BackendChoice.avFoundation)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(maxWidth: 320)
                 }
             }
 
@@ -372,7 +401,9 @@ public struct ScreenRecorderControl: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(playerTitle).font(.headline).lineLimit(1).truncationMode(.middle)
                 if let p = avPlayer {
-                    VideoPlayer(player: p)
+                    // 自定义 AVPlayerView 包装，避免 SwiftUI.VideoPlayer 在某些环境下触发
+                    // “failed to demangle superclass of VideoPlayerView” 的运行时问题。
+                    MacPlayerView(player: p)
                         .frame(minWidth: 640, minHeight: 360)
                         .onAppear { p.play() }
                 } else {
@@ -389,7 +420,8 @@ public struct ScreenRecorderControl: View {
                 includeCamera: persistedCamera,
                 displayID: selectedDisplayID.map { CGDirectDisplayID($0) } ?? configuration.displayID,
                 cropRect: configuration.cropRect,
-                baseDirectory: outputDirectory
+                baseDirectory: outputDirectory,
+                backend: (BackendChoice(rawValue: persistedBackend) ?? .screenCaptureKit) == .avFoundation ? .avFoundation : .screenCaptureKit
             )
             .frame(minWidth: 700, minHeight: 560)
         }
@@ -431,12 +463,29 @@ public struct ScreenRecorderControl: View {
 
         // Build primary scheme
         let scheme: CRRecorder.SchemeItem
+        let backend: CRRecorder.ScreenBackend = (BackendChoice(rawValue: persistedBackend) ?? .screenCaptureKit) == .avFoundation ? .avFoundation : .screenCaptureKit
         if mode == .window {
             guard let widInt = selectedWindowID ?? Int(windowIDText) else { errorMessage = "Please select a window"; return }
-            scheme = .window(displayId: 0, windowID: CGWindowID(widInt), hdr: hdr, captureSystemAudio: (persistedSystemAudio || configuration.captureSystemAudio), filename: fileName)
+            scheme = .window(
+                displayId: 0,
+                windowID: CGWindowID(widInt),
+                hdr: hdr,
+                captureSystemAudio: (persistedSystemAudio || configuration.captureSystemAudio),
+                filename: fileName,
+                backend: backend
+            )
         } else {
             let dispID: CGDirectDisplayID = selectedDisplayID.map { CGDirectDisplayID($0) } ?? configuration.displayID
-            scheme = .display(displayID: dispID, area: configuration.cropRect, hdr: hdr, captureSystemAudio: (persistedSystemAudio || configuration.captureSystemAudio), filename: fileName, excludedWindowTitles: [])
+            let area: CGRect? = (regionMode == .crop) ? configuration.cropRect : nil
+            scheme = .display(
+                displayID: dispID,
+                area: area,
+                hdr: hdr,
+                captureSystemAudio: (persistedSystemAudio || configuration.captureSystemAudio),
+                filename: fileName,
+                backend: backend,
+                excludedWindowTitles: []
+            )
         }
 
         // Build full schemes list (microphone optional)
@@ -822,6 +871,26 @@ public struct ScreenRecorderControl: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - Helpers
+
+/// macOS 专用的 AVPlayerView 包装，替代 SwiftUI.VideoPlayer。
+/// 这样可以绕过某些环境下 VideoPlayer 内部对 `AVPlayerView` 反射失败导致的
+/// “failed to demangle superclass of VideoPlayerView” 运行时错误。
+struct MacPlayerView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.controlsStyle = .floating
+        view.player = player
+        return view
+    }
+
+    func updateNSView(_ nsView: AVPlayerView, context: Context) {
+        nsView.player = player
     }
 }
 

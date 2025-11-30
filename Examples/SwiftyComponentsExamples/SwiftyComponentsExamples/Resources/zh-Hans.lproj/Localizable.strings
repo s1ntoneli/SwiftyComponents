@@ -90,3 +90,6 @@
 "Catalog.MicRawReplay.Summary" = "从 mic-*.raw.pcm 导出 WAV，用于离线重现";
 "Catalog.WaveformDemo.Title" = "Waveform 波形 Demo";
 "Catalog.WaveformDemo.Summary" = "使用内置音频样本预览不同波形样式";
+
+"Catalog.AVScreenRecorderDemo.Title" = "AVScreenRecorder 录屏 Demo";
+"Catalog.AVScreenRecorderDemo.Summary" = "使用 AVCaptureScreenInput 进行传统方式的屏幕录制";

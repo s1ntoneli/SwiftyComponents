@@ -69,7 +69,10 @@ public enum MediaCompositionBuilder {
         for f in info.files {
             let url = dir.appendingPathComponent(f.filename)
             let asset = AVURLAsset(url: url)
-            let insertion = CMTime(seconds: max(0, (f.recordingStartTimestamp ?? earliestStart) - earliestStart), preferredTimescale: 600)
+            let insertion = CMTime(
+                seconds: max(0, (f.recordingStartTimestamp ?? earliestStart) - earliestStart),
+                preferredTimescale: 600
+            )
             let duration = asset.duration
             let range = CMTimeRange(start: .zero, duration: duration)
 

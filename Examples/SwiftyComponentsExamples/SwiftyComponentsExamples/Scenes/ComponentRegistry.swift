@@ -55,6 +55,18 @@ enum ComponentRegistry {
                 )
             ]
         )
+        let avScreenRecorder = ComponentDemo(
+            id: "av-screen-recorder-demo",
+            title: String(localized: "Catalog.AVScreenRecorderDemo.Title"),
+            summary: String(localized: "Catalog.AVScreenRecorderDemo.Summary"),
+            variants: [
+                DemoVariant(
+                    id: "default",
+                    title: "Default",
+                    makeView: { AnyView(AVScreenRecorderDemoView()) }
+                )
+            ]
+        )
         let waveform = ComponentDemo(
             id: "waveform-demo",
             title: String(localized: "Catalog.WaveformDemo.Title"),
@@ -80,7 +92,7 @@ enum ComponentRegistry {
         return ComponentGroup(
             id: "media",
             title: String(localized: "Catalog.Group.Media"),
-            demos: [screenRecorder, permissions, micDiagnostics, micRawReplay, waveform]
+            demos: [screenRecorder, avScreenRecorder, permissions, micDiagnostics, micRawReplay, waveform]
         )
     }()
 }

@@ -12,8 +12,8 @@
 	"argv": [
 		"/opt/homebrew/bin/xcode-build-server"
 	],
-	"workspace": "/Users/lixindong/XcodeProjects/ScreenSage Pro/Packages/SwiftyComponents/Examples/SwiftyComponentsExamples/SwiftyComponentsExamples.xcodeproj/project.xcworkspace",
-	"build_root": "/Users/lixindong/Library/Developer/Xcode/DerivedData/SwiftyComponentsExamples-bfbrpfpbtsuunjadrdjlwnmyxsat",
+	"workspace": "/Users/lixindong/XcodeProjects/SwiftyComponents/Examples/SwiftyComponentsExamples/SwiftyComponentsExamples.xcodeproj/project.xcworkspace",
+	"build_root": "/Users/lixindong/Library/Developer/Xcode/DerivedData/SwiftyComponentsExamples-ejfmblxbjtthqshjhjsmcrhmffkv",
 	"scheme": "SwiftyComponentsExamples",
 	"kind": "xcode"
 }

@@ -29,11 +29,11 @@ final class AssetWriterCamBackend: CameraBackend {
     private var observers: [Any] = []
     private var observedDeviceID: String?
 
-    func configure(session: AVCaptureSession, device: AVCaptureDevice, delegate: CaptureRecordingDelegate, queue: DispatchQueue) throws {
+    func configure(session: AVCaptureSession, device: AVCaptureDevice?, delegate: CaptureRecordingDelegate, queue: DispatchQueue) throws {
         self.session = session
         self.delegate = delegate
         self.device = device
-        self.observedDeviceID = device.uniqueID
+        self.observedDeviceID = device?.uniqueID
 
         session.beginConfiguration()
         // 视频数据输出
@@ -259,11 +259,11 @@ extension AssetWriterCamBackend {
             }
         }
         let o3 = nc.addObserver(forName: .AVCaptureDeviceWasDisconnected, object: nil, queue: nil) { [weak self] n in
-            guard let self else { return }
-            guard let dev = n.object as? AVCaptureDevice else { return }
-            if dev.uniqueID == self.observedDeviceID {
-                self.delegate?.onError(RecordingError.recordingFailed("Camera disconnected"))
-            }
+            guard let self,
+                  let dev = n.object as? AVCaptureDevice,
+                  let observedID = self.observedDeviceID,
+                  dev.uniqueID == observedID else { return }
+            self.delegate?.onError(RecordingError.recordingFailed("Camera disconnected"))
         }
         observers = [o1, o2, o3]
     }

@@ -15,7 +15,8 @@ public class CRRecorder: @unchecked Sendable {
     var schemes: [SchemeItem]
     var captureSessions: [String: AVCaptureSession] = [:]
     var captureDelegates: [String: CaptureRecordingDelegate] = [:]
-    var screenCaptureSessions: ScreenCaptureRecorder?
+    /// 当前屏幕录制后端（ScreenCaptureKit 或 AVFoundation），单次录制仅使用一个实例。
+    var screenCaptureSessions: ScreenRecorderBackend?
     var screenOptions: ScreenRecorderOptions = .init()
     
     var appleDeviceCaptures: [String: CRAppleDeviceRecording] = [:]
@@ -39,6 +40,12 @@ public class CRRecorder: @unchecked Sendable {
     private var isStoppingAll: Bool = false
     private var stopAllCachedResult: Result? = nil
 
+    /// 屏幕录制后端类型。
+    public enum ScreenBackend: String, Sendable {
+        case screenCaptureKit
+        case avFoundation
+    }
+
     public init(_ schemes: [SchemeItem], outputDirectory: URL) {
         self.schemes = schemes
         self.outputDirectory = outputDirectory
@@ -52,20 +59,12 @@ public class CRRecorder: @unchecked Sendable {
         for scheme in schemes {
             print("[CRRecorder] 准备录制方案: \(scheme.id)")
             switch scheme {
-            case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename, _):
+            case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename, let backend, let excludedWindowTitles):
                 print("[CRRecorder] 准备屏幕录制 - 显示器ID: \(displayId), 文件名: \(filename), HDR: \(hdr), 系统音频: \(captureSystemAudio)")
-                screenCaptureSessions = ScreenCaptureRecorder(filePath: outputDirectory.appendingPathComponent(filename).appendingPathExtension("mov").path(percentEncoded: false), options: screenOptions)
-                screenCaptureSessions?.errorHandler = {
-                    NSLog("🔥 [CR_RECORDER_ERROR] CRRecorder 接收到屏幕录制错误: %@", $0.localizedDescription)
-                    self.onInterupt($0)
-                }
-            case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
+                screenCaptureSessions = makeScreenBackend(backend: backend, filename: filename)
+            case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename, let backend):
                 print("[CRRecorder] 准备窗口录制 - 显示器ID: \(displayId), 窗口ID: \(windowID), 文件名: \(filename)")
-                screenCaptureSessions = ScreenCaptureRecorder(filePath: outputDirectory.appendingPathComponent(filename).appendingPathExtension("mov").path(percentEncoded: false), options: screenOptions)
-                screenCaptureSessions?.errorHandler = {
-                    NSLog("🔥 [CR_RECORDER_ERROR] CRRecorder 接收到窗口录制错误: %@", $0.localizedDescription)
-                    self.onInterupt($0)
-                }
+                screenCaptureSessions = makeScreenBackend(backend: backend, filename: filename)
             case .camera(cameraID: let cameraID, filename: let filename):
                 print("[CRRecorder] 准备摄像头录制 - 摄像头ID: \(cameraID), 文件名: \(filename)")
 //                prepareCameraSession(cameraID: cameraID, filename: filename)
@@ -165,10 +164,10 @@ public class CRRecorder: @unchecked Sendable {
         var fileAssets: [BundleInfo.FileAsset] = []
         for scheme in schemes {
             switch scheme {
-            case .display(displayID: let displayID, area: let area, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename, _):
+            case .display:
                 let assets = screenCaptureSessions?.packLastResult() ?? []
                 fileAssets.append(contentsOf: assets)
-            case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
+            case .window:
                 let assets = screenCaptureSessions?.packLastResult() ?? []
                 fileAssets.append(contentsOf: assets)
             case .camera(cameraID: let cameraID, filename: let filename):
@@ -199,10 +198,25 @@ public class CRRecorder: @unchecked Sendable {
     
     func startRecord(scheme: SchemeItem) async throws {
         switch scheme {
-        case .display(displayID: let displayID, area: let area, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename, let excludedWindowTitles):
-            try await screenCaptureSessions?.startScreenCapture(displayID: displayID, cropRect: area, hdr: hdr, showsCursor: screenOptions.showsCursor, includeAudio: captureSystemAudio, excludedWindowTitles: excludedWindowTitles)
-        case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
-            try await screenCaptureSessions?.startWindowCapture(windowID: windowID, displayID: displayId, hdr: hdr, includeAudio: captureSystemAudio)
+        case .display(displayID: let displayID, area: let area, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename, let backend, let excludedWindowTitles):
+            // 在 prepare 阶段已根据 backend 初始化好 screenCaptureSessions，这里直接启动。
+            _ = try await screenCaptureSessions?.startScreenCapture(
+                displayID: displayID,
+                cropRect: area,
+                hdr: hdr,
+                showsCursor: screenOptions.showsCursor,
+                includeAudio: captureSystemAudio,
+                excludedWindowTitles: excludedWindowTitles
+            )
+        case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename, let backend):
+            _ = try await screenCaptureSessions?.startWindowCapture(
+                windowID: windowID,
+                displayID: displayId,
+                hdr: hdr,
+                includeAudio: captureSystemAudio,
+                frameRate: screenOptions.fps,
+                h265: screenOptions.useHEVC
+            )
         case .camera(cameraID: let cameraID, filename: let filename):
             if let cameraCapture = cameraCaptures[cameraID] {
                 let fileURL = outputDirectory.appendingPathComponent(filename, conformingTo: .movie).appendingPathExtension("mov")
@@ -254,12 +268,26 @@ public class CRRecorder: @unchecked Sendable {
         print("[CRRecorder] 开始执行录制方案: \(scheme.id)")
         
         switch scheme {
-        case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename, let excludedWindowTitles):
+        case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename, let backend, let excludedWindowTitles):
             print("[CRRecorder] 开始屏幕录制")
-            return try await screenCaptureSessions?.startScreenCapture(displayID: displayId, cropRect: area, hdr: hdr, showsCursor: screenOptions.showsCursor, includeAudio: captureSystemAudio, excludedWindowTitles: excludedWindowTitles) ?? []
-        case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
+            return try await screenCaptureSessions?.startScreenCapture(
+                displayID: displayId,
+                cropRect: area,
+                hdr: hdr,
+                showsCursor: screenOptions.showsCursor,
+                includeAudio: captureSystemAudio,
+                excludedWindowTitles: excludedWindowTitles
+            ) ?? []
+        case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename, let backend):
             print("[CRRecorder] 开始窗口录制")
-            return try await screenCaptureSessions?.startWindowCapture(windowID: windowID, displayID: displayId, hdr: hdr, includeAudio: captureSystemAudio) ?? []
+            return try await screenCaptureSessions?.startWindowCapture(
+                windowID: windowID,
+                displayID: displayId,
+                hdr: hdr,
+                includeAudio: captureSystemAudio,
+                frameRate: screenOptions.fps,
+                h265: screenOptions.useHEVC
+            ) ?? []
         case .camera(cameraID: let cameraID, filename: let filename):
             print("[CRRecorder] 开始摄像头录制")
             let fileURL = outputDirectory.appendingPathComponent(filename, conformingTo: .mpeg4Movie)
@@ -276,39 +304,8 @@ public class CRRecorder: @unchecked Sendable {
     }
     
     func stopRecording() async throws {
-        print("[CRRecorder] 开始停止录制")
-        try await withThrowingTaskGroup { group in
-            for scheme in schemes {
-                group.addTask {
-                    print("[CRRecorder] 停止录制方案: \(scheme.id)")
-                    switch scheme {
-                    case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename, _):
-                        print("[CRRecorder] 停止屏幕录制")
-                        try await self.screenCaptureSessions?.stop()
-                        break
-                    case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
-                        print("[CRRecorder] 停止窗口录制")
-                        try await self.screenCaptureSessions?.stop()
-                        break
-                    case .camera(cameraID: let cameraID, filename: let filename):
-                        print("[CRRecorder] 停止摄像头录制")
-                        //                    let fileURL = outputDirectory.appendingPathComponent(filename, conformingTo: .mpeg4Movie)
-                        //                    try await recordCamera(cameraId: cameraID, fileURL: fileURL)
-                        try await self.stopRecording(deviceID: cameraID)
-                    case .microphone(microphoneID: let microphoneID, filename: let filename):
-                        print("[CRRecorder] 停止麦克风录制")
-                        //                    let fileURL = outputDirectory.appendingPathComponent(filename, conformingTo: .mpeg4Audio)
-                        //                    try await recordMicrophone(microphoneId: microphoneID, fileURL: fileURL)
-                        try await self.stopRecording(deviceID: microphoneID)
-                    case .appleDevice(appleDeviceID: let appleDeviceID, filename: let filename):
-                        print("[CRRecorder] 停止苹果设备录制")
-                        break
-                    }
-                }
-            }
-            for try await result in group {}
-        }
-        print("[CRRecorder] 所有录制已停止")
+        // 旧的 stopRecording 仅用于简单调用场景，这里直接复用带 result 的实现。
+        _ = try await stopRecordingWithResult()
     }
     
     
@@ -385,10 +382,10 @@ public class CRRecorder: @unchecked Sendable {
     
     func stopRecordingWithResult(scheme: SchemeItem) async throws -> [BundleInfo.FileAsset] {
         switch scheme {
-        case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename, _):
+        case .display(let displayId, _, _, _, let filename, let backend, _):
             print("[CRRecorder] 停止屏幕录制")
             return try await screenCaptureSessions?.stop() ?? []
-        case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename):
+        case .window(displayId: let displayId, windowID: let windowID, hdr: _, captureSystemAudio: _, filename: let filename, let backend):
             print("[CRRecorder] 停止窗口录制")
             return try await screenCaptureSessions?.stop() ?? []
         case .camera(cameraID: let cameraID, filename: let filename):
@@ -425,17 +422,32 @@ public class CRRecorder: @unchecked Sendable {
     }
     
     public enum SchemeItem: Identifiable, Hashable, Equatable, Sendable {
-        case display(displayID: CGDirectDisplayID, area: CGRect?, hdr: Bool, captureSystemAudio: Bool, filename: String, excludedWindowTitles: [String])
-        case window(displayId: CGDirectDisplayID, windowID: CGWindowID, hdr: Bool, captureSystemAudio: Bool, filename: String)
+        case display(
+            displayID: CGDirectDisplayID,
+            area: CGRect?,
+            hdr: Bool,
+            captureSystemAudio: Bool,
+            filename: String,
+            backend: ScreenBackend,
+            excludedWindowTitles: [String]
+        )
+        case window(
+            displayId: CGDirectDisplayID,
+            windowID: CGWindowID,
+            hdr: Bool,
+            captureSystemAudio: Bool,
+            filename: String,
+            backend: ScreenBackend
+        )
         case camera(cameraID: String, filename: String)
         case microphone(microphoneID: String, filename: String)
         case appleDevice(appleDeviceID: String, filename: String)
         
         public var id: String {
             switch self {
-            case .display(let displayId, _, _, _, _, _):
+            case .display(let displayId, _, _, _, _, _, _):
                 return "display_\(displayId)"
-            case .window(let displayId, let windowID, _, _, _):
+            case .window(let displayId, let windowID, _, _, _, _):
                 return "window_\(displayId)_\(windowID)"
             case .camera(let cameraID, _):
                 return "camera_\(cameraID)"
@@ -499,8 +511,36 @@ public class CRRecorder: @unchecked Sendable {
     }
 }
 
-// MARK: - Persist manifest
+// MARK: - Helpers
 extension CRRecorder {
+    /// 根据 backend 创建对应的屏幕录制实现；集中做一次 switch，后续流程统一走 `ScreenRecorderBackend` 接口。
+    fileprivate func makeScreenBackend(backend: ScreenBackend, filename: String) -> ScreenRecorderBackend {
+        let filePath = outputDirectory
+            .appendingPathComponent(filename)
+            .appendingPathExtension("mov")
+            .path(percentEncoded: false)
+        switch backend {
+        case .screenCaptureKit:
+            let recorder = ScreenCaptureRecorder(filePath: filePath, options: screenOptions)
+            recorder.errorHandler = { [weak self] error in
+                guard let self else { return }
+                NSLog("🔥 [CR_RECORDER_ERROR] CRRecorder 接收到屏幕/窗口录制错误: %@", error.localizedDescription)
+                self.onInterupt(error)
+            }
+            return recorder
+        case .avFoundation:
+            let backendRecorder = AVFoundationScreenRecorderBackend(outputDirectory: outputDirectory, baseFilename: filename, options: screenOptions)
+            backendRecorder.errorHandler = { [weak self] error in
+                guard let self else { return }
+                let ns = error as NSError
+                NSLog("🔥 [CR_RECORDER_AVSCREEN_ERROR] domain=%@ code=%ld msg=%@", ns.domain, ns.code, ns.localizedDescription)
+                self.onInterupt(error)
+            }
+            return backendRecorder
+        }
+    }
+
+    // MARK: - Persist manifest
     fileprivate func writeBundleManifestIfPossible(_ info: BundleInfo) {
         do {
             let encoder = JSONEncoder()
