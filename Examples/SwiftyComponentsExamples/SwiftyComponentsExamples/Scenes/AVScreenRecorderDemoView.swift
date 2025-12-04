@@ -45,10 +45,8 @@ struct AVScreenRecorderDemoView: View {
     @State private var cropWidthText: String = ""
     @State private var cropHeightText: String = ""
 
-    // Audio capture (microphone / loopback / etc.)
-    @State private var includeAudio: Bool = false
-    @State private var audioDevices: [AVCaptureDevice] = []
-    @State private var selectedAudioDeviceID: String? = nil  // nil = system default
+    // Audio capture is not supported in this AVScreenRecorder demo.
+    // Use CRRecorder / ScreenRecorderControl for system audio + microphone.
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -57,7 +55,6 @@ struct AVScreenRecorderDemoView: View {
             modeControls
             targetSelection
             cropControls
-            audioControls
             recordingControls
             resultSection
             Spacer()
@@ -67,7 +64,6 @@ struct AVScreenRecorderDemoView: View {
         .onAppear {
             reloadDisplays()
             reloadWindows()
-            reloadAudioDevices()
         }
     }
 
@@ -178,33 +174,6 @@ struct AVScreenRecorderDemoView: View {
         }
     }
 
-    private var audioControls: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Toggle("Include audio", isOn: $includeAudio)
-            if includeAudio {
-                HStack(spacing: 8) {
-                    Text("Input:")
-                    Picker("Input", selection: Binding(
-                        get: { selectedAudioDeviceID ?? "default" },
-                        set: { newValue in
-                            selectedAudioDeviceID = (newValue == "default") ? nil : newValue
-                        }
-                    )) {
-                        Text("System default").tag("default")
-                        ForEach(audioDevices, id: \.uniqueID) { d in
-                            Text(d.localizedName).tag(d.uniqueID)
-                        }
-                    }
-                    .frame(minWidth: 240)
-                }
-                Text("Choose a loopback device here if you want pure system audio; choose a microphone to include mic.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .accessibilityIdentifier("AVScreenRecorderDemo.Audio")
-    }
-
     private var recordingControls: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
@@ -283,9 +252,7 @@ struct AVScreenRecorderDemoView: View {
                 cropRect: cropRect,
                 showsCursor: true,
                 capturesMouseClicks: false,
-                fps: 30,
-                includeAudio: includeAudio,
-                audioDeviceUniqueID: selectedAudioDeviceID
+                fps: 30
             )
             let recorder = AVScreenRecorder(configuration: config)
             self.recorder = recorder
@@ -378,13 +345,6 @@ struct AVScreenRecorderDemoView: View {
             selectedDisplayID = ids.first
         }
         updateCropDefaultsForCurrentDisplay()
-    }
-
-    private func reloadAudioDevices() {
-        audioDevices = AVCaptureDevice.devices(for: .audio)
-        if selectedAudioDeviceID == nil {
-            selectedAudioDeviceID = nil
-        }
     }
 
     private func reloadWindows() {

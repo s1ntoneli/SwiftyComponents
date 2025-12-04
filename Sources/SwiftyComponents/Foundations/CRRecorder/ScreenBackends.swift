@@ -80,9 +80,7 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
             cropRect: cropRect,
             showsCursor: showsCursor,
             capturesMouseClicks: false,
-            fps: options.fps,
-            includeAudio: includeAudio,
-            audioDeviceUniqueID: nil
+            fps: options.fps
         )
         try await startWithConfiguration(config)
         // 与 ScreenCaptureRecorder 一致：启动阶段仅返回文件名/起始时间占位信息，
@@ -115,9 +113,7 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
             cropRect: bounds,
             showsCursor: options.showsCursor,
             capturesMouseClicks: false,
-            fps: frameRate,
-            includeAudio: includeAudio,
-            audioDeviceUniqueID: nil
+            fps: frameRate
         )
         try await startWithConfiguration(config)
         let url = makeFileURL()

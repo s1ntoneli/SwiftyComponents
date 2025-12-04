@@ -23,16 +23,11 @@ public final class AVScreenRecorder: NSObject, @unchecked Sendable {
         public var capturesMouseClicks: Bool
         /// Target frame rate. The actual frame rate may be lower depending on system load.
         public var fps: Int
-        /// Include audio from the default audio input device (e.g. a virtual loopback device).
+        /// Whether to include audio alongside the screen capture.
         ///
-        /// Note: AVFoundation does not directly expose "system audio". To capture what the user
-        /// hears from the speakers, a virtual loopback device (or similar) must be configured
-        /// as an audio input. When this flag is `true`, the recorder will attach the system
-        /// default audio input device if possible.
+        /// 当前实现基于 `AVCaptureScreenInput`，**不具备录制系统音频的能力**，也不会挂载麦克风输入。
+        /// 因此该参数目前会被忽略，仅为保持旧调用方的源码兼容而保留。
         public var includeAudio: Bool
-        /// Optional audio device unique ID to capture from when `includeAudio` is true.
-        /// If `nil`, the system default audio input device is used.
-        public var audioDeviceUniqueID: String?
 
         public init(
             displayID: CGDirectDisplayID = CGMainDisplayID(),
@@ -40,8 +35,7 @@ public final class AVScreenRecorder: NSObject, @unchecked Sendable {
             showsCursor: Bool = true,
             capturesMouseClicks: Bool = false,
             fps: Int = 30,
-            includeAudio: Bool = false,
-            audioDeviceUniqueID: String? = nil
+            includeAudio: Bool = false
         ) {
             self.displayID = displayID
             self.cropRect = cropRect
@@ -49,7 +43,6 @@ public final class AVScreenRecorder: NSObject, @unchecked Sendable {
             self.capturesMouseClicks = capturesMouseClicks
             self.fps = max(1, fps)
             self.includeAudio = includeAudio
-            self.audioDeviceUniqueID = audioDeviceUniqueID
         }
     }
 
@@ -98,7 +91,6 @@ public final class AVScreenRecorder: NSObject, @unchecked Sendable {
 
     private var session: AVCaptureSession?
     private var screenInput: AVCaptureScreenInput?
-    private var audioInput: AVCaptureDeviceInput?
     /// Reuse the same AssetWriter-based backend as camera recording, so PTS and file contents
     /// come from the same data-output pipeline.
     private let backend = AssetWriterCamBackend()
@@ -188,7 +180,6 @@ public final class AVScreenRecorder: NSObject, @unchecked Sendable {
         // 清理强引用
         session = nil
         screenInput = nil
-        audioInput = nil
         captureDelegate = nil
 
         return Result(
@@ -235,23 +226,6 @@ public final class AVScreenRecorder: NSObject, @unchecked Sendable {
                     }
                     session.addInput(screenInput)
 
-                    var audioInput: AVCaptureDeviceInput?
-                    if self.configuration.includeAudio {
-                        let audioDevice: AVCaptureDevice?
-                        if let uniqueID = self.configuration.audioDeviceUniqueID {
-                            audioDevice = AVCaptureDevice.devices(for: .audio).first(where: { $0.uniqueID == uniqueID })
-                        } else {
-                            audioDevice = AVCaptureDevice.default(for: .audio)
-                        }
-                        if let audioDevice {
-                            let input = try AVCaptureDeviceInput(device: audioDevice)
-                            if session.canAddInput(input) {
-                                session.addInput(input)
-                                audioInput = input
-                            }
-                        }
-                    }
-
                     // 复用 CRRecorder 里的 CaptureRecordingDelegate 作为数据输出代理。
                     let delegate = CaptureRecordingDelegate()
                     delegate.onError = { [weak self] error in
@@ -271,14 +245,13 @@ public final class AVScreenRecorder: NSObject, @unchecked Sendable {
                     }
                     try backend.configure(
                         session: session,
-                        device: audioInput?.device, // 仅用于观察断连/估算 fps，可为空
+                        device: nil, // 屏幕录制路径不依赖物理设备，传入 nil 即可
                         delegate: delegate,
                         queue: self.sessionQueue
                     )
 
                     self.session = session
                     self.screenInput = screenInput
-                    self.audioInput = audioInput
                     continuation.resume()
                 } catch {
                     continuation.resume(throwing: error)

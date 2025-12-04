@@ -23,6 +23,9 @@ final class AssetWriterCamBackend: CameraBackend {
     // 记录最后一帧视频样本以便在收尾时做一次 keepalive（与屏幕录制保持一致）
     private var lastVideoSample: CMSampleBuffer?
     private var lastVideoPTS: CMTime?
+    // 对齐音频时间轴：记录首帧视频 PTS 以及音频的时间偏移，避免“系统音频”设备使用不同时钟导致长时间静止帧。
+    private var firstVideoPTS: CMTime?
+    private var audioTimeOffset: CMTime?
 
     func apply(options: CameraRecordingOptions) { self.options = options }
     private var didSignalError = false
@@ -186,6 +189,7 @@ final class AssetWriterCamBackend: CameraBackend {
                 if writer.startWriting() {
                     writer.startSession(atSourceTime: pts)
                     writerSessionStarted = true
+                    firstVideoPTS = pts
                     onFirstPTS?(pts)
                     startContinuation?.resume(returning: ())
                     startContinuation = nil
@@ -218,7 +222,33 @@ final class AssetWriterCamBackend: CameraBackend {
             }
             return
         }
-        let ok = aIn.append(sampleBuffer)
+        // 当屏幕录制附带“系统音频”时，音频设备的时钟可能与视频使用的时钟有较大偏移。
+        // 这里按第一次音频与视频的 PTS 差值对齐整条音轨，避免出现“几秒录制 → 数小时静止帧”的情况。
+        let bufferToAppend: CMSampleBuffer
+        if let base = firstVideoPTS {
+            if audioTimeOffset == nil {
+                audioTimeOffset = CMTimeSubtract(sampleBuffer.presentationTimeStamp, base)
+            }
+            if let offset = audioTimeOffset {
+                let adjPTS = CMTimeSubtract(sampleBuffer.presentationTimeStamp, offset)
+                var timing = CMSampleTimingInfo(
+                    duration: sampleBuffer.duration,
+                    presentationTimeStamp: adjPTS,
+                    decodeTimeStamp: sampleBuffer.decodeTimeStamp
+                )
+                if let reTimed = try? CMSampleBuffer(copying: sampleBuffer, withNewTiming: [timing]) {
+                    bufferToAppend = reTimed
+                } else {
+                    bufferToAppend = sampleBuffer
+                }
+            } else {
+                bufferToAppend = sampleBuffer
+            }
+        } else {
+            bufferToAppend = sampleBuffer
+        }
+
+        let ok = aIn.append(bufferToAppend)
         if let w = writer, (!ok || w.status == .failed), !didSignalError {
             didSignalError = true
             delegate?.onError(w.error ?? RecordingError.recordingFailed("Camera audio append failed"))
@@ -227,15 +257,15 @@ final class AssetWriterCamBackend: CameraBackend {
 
     private func appendFinalKeepaliveIfNeeded() {
         guard let base = lastVideoSample else { return }
-        let nowPTS = CMClockGetTime(CMClockGetHostTimeClock())
         if let last = lastVideoPTS {
-            if CMTimeCompare(nowPTS, last) <= 0 { return }
+            // 在时间轴上紧跟最后一帧追加一个 keepalive 帧，避免使用 hostTime 造成极大时间跳跃。
             let duration: CMTime = {
                 let d = base.duration
                 if d.isValid && d.value != 0 { return d }
                 return CMTime(value: 1, timescale: 60)
             }()
-            var timing = CMSampleTimingInfo(duration: duration, presentationTimeStamp: nowPTS, decodeTimeStamp: base.decodeTimeStamp)
+            let newPTS = CMTimeAdd(last, duration)
+            var timing = CMSampleTimingInfo(duration: duration, presentationTimeStamp: newPTS, decodeTimeStamp: base.decodeTimeStamp)
             if let dup = try? CMSampleBuffer(copying: base, withNewTiming: [timing]),
                let input = videoInput, input.isReadyForMoreMediaData, writer?.status == .writing {
                 _ = input.append(dup)
