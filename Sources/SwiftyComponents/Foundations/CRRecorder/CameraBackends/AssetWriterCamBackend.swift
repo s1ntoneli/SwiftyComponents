@@ -128,6 +128,9 @@ final class AssetWriterCamBackend: CameraBackend {
             }
             // 依据分辨率与帧率估算目标码率；默认 H.264，可按开关尝试 HEVC
             let fps: Int = {
+                if let override = options.bitrateFPSOverride, override > 0 {
+                    return override
+                }
                 if let d = device {
                     let min = d.activeVideoMinFrameDuration
                     if min.value != 0 { return max(1, Int(round(Double(min.timescale) / Double(min.value)))) }

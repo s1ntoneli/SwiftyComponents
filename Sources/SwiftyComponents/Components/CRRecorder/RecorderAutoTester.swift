@@ -238,6 +238,8 @@ final class RecorderAutoTester: ObservableObject {
         let sessionDir: URL
         let files: [FileCheck]
         let passed: Bool
+        /// Screen recording backend used for this run（ScreenCaptureKit / AVFoundation）；为 parity 场景则为 nil。
+        let backend: CRRecorder.ScreenBackend?
         let note: String
         let backendParity: ScreenBackendParitySummary?
     }
@@ -280,7 +282,7 @@ final class RecorderAutoTester: ObservableObject {
         defer { isRunning = false }
 
         // Log run header for easier automation parsing
-        logAutoTest("START scenarios=\(config.scenarios.count) reps=\(config.repetitions) secondsOverride=\(config.secondsOverride?.description ?? "nil") systemAudio=\(config.includeSystemAudio) mic=\(config.includeMicrophone) cam=\(config.includeCamera) display=\(config.displayID) crop=\(config.cropRect?.debugDescription ?? "nil") base=\(config.baseOutput.path)")
+        logAutoTest("START scenarios=\(config.scenarios.count) reps=\(config.repetitions) secondsOverride=\(config.secondsOverride?.description ?? "nil") systemAudio=\(config.includeSystemAudio) mic=\(config.includeMicrophone) cam=\(config.includeCamera) backend=\(config.backend.rawValue) display=\(config.displayID) crop=\(config.cropRect?.debugDescription ?? "nil") base=\(config.baseOutput.path)")
 
         var counter = 0
         for scenario in config.scenarios {
@@ -303,12 +305,12 @@ final class RecorderAutoTester: ObservableObject {
                        [.shortQuick, .beforeFirstFrame, .stress10].contains(scenario.id) {
                         let dir = config.baseOutput
                         let note = "AVScreenRecorder returned 'Cannot Record' for \(scenario.id.rawValue) under legacy backend; treated as pass (no crash)."
-                        let passed = RunResult(scenario: scenario, index: i, sessionDir: dir, files: [], passed: true, note: note, backendParity: nil)
+                        let passed = RunResult(scenario: scenario, index: i, sessionDir: dir, files: [], passed: true, backend: config.backend, note: note, backendParity: nil)
                         results.append(passed)
                         logRunResult(passed)
                     } else {
                         let dir = config.baseOutput
-                        let failed = RunResult(scenario: scenario, index: i, sessionDir: dir, files: [], passed: false, note: error.localizedDescription, backendParity: nil)
+                        let failed = RunResult(scenario: scenario, index: i, sessionDir: dir, files: [], passed: false, backend: config.backend, note: error.localizedDescription, backendParity: nil)
                         results.append(failed)
                         logRunResult(failed)
                     }
@@ -356,27 +358,8 @@ final class RecorderAutoTester: ObservableObject {
         default: break
         }
 
-        if includeScreen {
-            schemes.append(
-                .display(
-                    displayID: config.displayID,
-                    area: config.cropRect,
-                    hdr: false,
-                    captureSystemAudio: captureSystemAudio,
-                    filename: dirName,
-                    backend: config.backend,
-                    excludedWindowTitles: []
-                )
-            )
-        }
-        if wantMic { schemes.append(.microphone(microphoneID: "default", filename: dirName + "-mic")) }
-        if wantCam { schemes.append(.camera(cameraID: "default", filename: dirName + "-cam")) }
-
-        let rec = CRRecorder(schemes, outputDirectory: sessionDir)
-        // 捕获屏幕流错误，用于失败时标注具体原因
-        var lastStreamError: NSError? = nil
-        rec.onInterupt = { err in lastStreamError = err as NSError }
-        var opts = ScreenRecorderOptions(
+        // Per-run screen options
+        var screenOptions = ScreenRecorderOptions(
             fps: 60,
             queueDepth: nil,
             targetBitRate: nil,
@@ -386,14 +369,51 @@ final class RecorderAutoTester: ObservableObject {
             useHEVC: false
         )
         switch scenario.id {
-        case .highFPS120: opts.fps = 120
-        case .lowFPS15: opts.fps = 15
-        case .hevcHDR: opts.hdr = true; opts.useHEVC = true
-        case .cursorOn: opts.showsCursor = true
-        case .cursorOff: opts.showsCursor = false
+        case .highFPS120: screenOptions.fps = 120
+        case .lowFPS15: screenOptions.fps = 15
+        case .hevcHDR: screenOptions.hdr = true; screenOptions.useHEVC = true
+        case .cursorOn: screenOptions.showsCursor = true
+        case .cursorOff: screenOptions.showsCursor = false
         default: break
         }
-        rec.screenOptions = opts
+
+        if includeScreen {
+            schemes.append(
+                .display(
+                    displayID: config.displayID,
+                    area: config.cropRect,
+                    hdr: false,
+                    captureSystemAudio: captureSystemAudio,
+                    filename: dirName,
+                    backend: config.backend,
+                    screenOptions: screenOptions,
+                    excludedWindowTitles: []
+                )
+            )
+        }
+        if wantMic {
+            schemes.append(
+                .microphone(
+                    microphoneID: "default",
+                    filename: dirName + "-mic",
+                    microphoneOptions: .init()
+                )
+            )
+        }
+        if wantCam {
+            schemes.append(
+                .camera(
+                    cameraID: "default",
+                    filename: dirName + "-cam",
+                    cameraOptions: .init()
+                )
+            )
+        }
+
+        let rec = CRRecorder(schemes, outputDirectory: sessionDir)
+        // 捕获屏幕流错误，用于失败时标注具体原因
+        var lastStreamError: NSError? = nil
+        rec.onInterupt = { err in lastStreamError = err as NSError }
         try await rec.prepare(schemes)
         try await rec.startRecording()
 
@@ -465,9 +485,9 @@ final class RecorderAutoTester: ObservableObject {
                     let dur = (try? await asset.load(.duration)).map { CMTimeGetSeconds($0) } ?? 0
                     checks.append(FileCheck(filename: f.filename, expectedSeconds: -1, actualSeconds: dur, pass: true))
                 }
-                return RunResult(scenario: scenario, index: index, sessionDir: sessionDir, files: checks, passed: true, note: note, backendParity: nil)
+                return RunResult(scenario: scenario, index: index, sessionDir: sessionDir, files: checks, passed: true, backend: config.backend, note: note, backendParity: nil)
             } else {
-                return RunResult(scenario: scenario, index: index, sessionDir: sessionDir, files: [], passed: true, note: note, backendParity: nil)
+                return RunResult(scenario: scenario, index: index, sessionDir: sessionDir, files: [], passed: true, backend: config.backend, note: note, backendParity: nil)
             }
         case .stress10, .shortQuick, .staticLong, .micOnly, .camOnly, .highFPS120, .lowFPS15, .hevcHDR, .noAudio, .cursorOn, .cursorOff, .long60s, .camMicBoth, .backendParity, .backendParityLowFPS, .backendParityHighFPS, .backendParityFullScreen, .backendParityHEVC, .backendParityLong:
             try? await Task.sleep(nanoseconds: UInt64(max(0.1, seconds) * 1_000_000_000))
@@ -514,7 +534,7 @@ final class RecorderAutoTester: ObservableObject {
                 note += "\n原因: " + rsn
             }
         }
-        return RunResult(scenario: scenario, index: index, sessionDir: sessionDir, files: checks, passed: allPass, note: note, backendParity: nil)
+        return RunResult(scenario: scenario, index: index, sessionDir: sessionDir, files: checks, passed: allPass, backend: config.backend, note: note, backendParity: nil)
     }
 
     /// Special scenario: record twice (ScreenCaptureKit + AVFoundation) and compare core metrics.
@@ -585,17 +605,7 @@ final class RecorderAutoTester: ObservableObject {
             suffix: String
         ) async throws -> URL {
             let baseName = dirName + "-" + suffix
-            let scheme: CRRecorder.SchemeItem = .display(
-                displayID: config.displayID,
-                area: area,
-                hdr: hdr,
-                captureSystemAudio: false,
-                filename: baseName,
-                backend: backend,
-                excludedWindowTitles: []
-            )
-            let rec = CRRecorder([scheme], outputDirectory: sessionDir)
-            var opts = ScreenRecorderOptions(
+            let screenOptions = ScreenRecorderOptions(
                 fps: fps,
                 queueDepth: nil,
                 targetBitRate: nil,
@@ -604,7 +614,17 @@ final class RecorderAutoTester: ObservableObject {
                 hdr: hdr,
                 useHEVC: useHEVC
             )
-            rec.screenOptions = opts
+            let scheme: CRRecorder.SchemeItem = .display(
+                displayID: config.displayID,
+                area: area,
+                hdr: hdr,
+                captureSystemAudio: false,
+                filename: baseName,
+                backend: backend,
+                screenOptions: screenOptions,
+                excludedWindowTitles: []
+            )
+            let rec = CRRecorder([scheme], outputDirectory: sessionDir)
             try await rec.prepare([scheme])
             try await rec.startRecording()
             try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
@@ -668,6 +688,7 @@ final class RecorderAutoTester: ObservableObject {
             sessionDir: sessionDir,
             files: checks,
             passed: allPass,
+            backend: nil, // parity 场景：内部同时使用 SCK + AVFoundation
             note: note,
             backendParity: parity
         )
@@ -691,7 +712,16 @@ extension RecorderAutoTester {
     }
 
     private func logRunResult(_ r: RunResult) {
-        let header = "scenario=\(r.scenario.id.rawValue) index=\(r.index) passed=\(r.passed) note=\(r.note) dir=\(r.sessionDir.lastPathComponent)"
+        let backendDesc: String = {
+            if let b = r.backend {
+                return b.rawValue
+            }
+            if r.backendParity != nil {
+                return "parity(screenCaptureKit+avFoundation)"
+            }
+            return "unknown"
+        }()
+        let header = "scenario=\(r.scenario.id.rawValue) index=\(r.index) backend=\(backendDesc) passed=\(r.passed) note=\(r.note) dir=\(r.sessionDir.lastPathComponent)"
         logAutoTest("RESULT " + header)
         if r.files.isEmpty {
             logAutoTest("FILES 0")
@@ -829,6 +859,9 @@ struct RecorderAutoTestPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("自动化测试").font(.headline)
             Text("选择场景与次数，自动运行并校验时长与文件").font(.caption).foregroundStyle(.secondary)
+            Text("当前录制后端: \(backendDisplayName(backend))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
 
             List(tester.availableScenarios(), id: \.self, selection: $selected) { sc in
                 VStack(alignment: .leading, spacing: 2) {
@@ -864,6 +897,9 @@ struct RecorderAutoTestPanel: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
                                     Text("\(r.scenario.title) #\(r.index)")
+                                    Text("· 后端: \(resultBackendDisplayName(r))")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
                                     Spacer()
                                     Text(r.passed ? "✅" : "❌")
                                 }
@@ -901,6 +937,24 @@ struct RecorderAutoTestPanel: View {
         )
         try? FileManager.default.createDirectory(at: cfg.baseOutput, withIntermediateDirectories: true)
         await tester.run(config: cfg)
+    }
+
+    // MARK: - Backend labels
+    private func backendDisplayName(_ backend: CRRecorder.ScreenBackend) -> String {
+        switch backend {
+        case .screenCaptureKit: return "ScreenCaptureKit"
+        case .avFoundation: return "AVFoundation"
+        }
+    }
+
+    private func resultBackendDisplayName(_ result: RecorderAutoTester.RunResult) -> String {
+        if let b = result.backend {
+            return backendDisplayName(b)
+        }
+        if result.backendParity != nil {
+            return "ScreenCaptureKit + AVFoundation (Parity)"
+        }
+        return "Unknown"
     }
 }
 

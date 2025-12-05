@@ -46,12 +46,11 @@ struct RecorderDocsPanel: View {
             // 方案：显示器 + 区域
             let displayID = CGMainDisplayID()
             let crop = CGRect(x: 0, y: 0, width: 800, height: 600)
+            let opts = ScreenRecorderOptions(fps: 60, includeAudio: false, showsCursor: true)
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: crop, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: [])
+                .display(displayID: displayID, area: crop, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, screenOptions: opts, excludedWindowTitles: [])
             ]
-            
             let recorder = CRRecorder(schemes, outputDirectory: session)
-            recorder.screenOptions = .init(fps: 60, includeAudio: false, showsCursor: true)
             
             """ + commonTail()
         )
@@ -61,11 +60,11 @@ struct RecorderDocsPanel: View {
             summary: "系统音频随屏幕写入到同一个 .mov",
             code: baseHeader + mkDirSnippet() + """
             let displayID = CGMainDisplayID()
+            let opts = ScreenRecorderOptions(fps: 60, includeAudio: true, showsCursor: true)
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: true, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: [])
+                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: true, filename: "screen", backend: .screenCaptureKit, screenOptions: opts, excludedWindowTitles: [])
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
-            recorder.screenOptions = .init(fps: 60, includeAudio: true, showsCursor: true)
             """ + commonTail()
         )
 
@@ -76,11 +75,11 @@ struct RecorderDocsPanel: View {
             // 取前台窗口ID（示例：自行替换为目标窗口）
             let content = try await SCShareableContent.current
             guard let win = content.windows.first else { throw NSError(domain: "Demo", code: -1) }
+            let opts = ScreenRecorderOptions(fps: 60, includeAudio: false)
             let schemes: [CRRecorder.SchemeItem] = [
-                .window(displayId: 0, windowID: win.windowID, hdr: false, captureSystemAudio: false, filename: "window", backend: .screenCaptureKit)
+                .window(displayId: 0, windowID: win.windowID, hdr: false, captureSystemAudio: false, filename: "window", backend: .screenCaptureKit, screenOptions: opts)
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
-            recorder.screenOptions = .init(fps: 60, includeAudio: false)
             """ + commonTail()
         )
 
@@ -89,12 +88,12 @@ struct RecorderDocsPanel: View {
             summary: "屏幕视频 + 独立 .m4a 麦克风文件",
             code: baseHeader + mkDirSnippet() + """
             let displayID = CGMainDisplayID()
+            let opts = ScreenRecorderOptions(fps: 60, includeAudio: false)
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: []),
-                .microphone(microphoneID: "default", filename: "screen-mic")
+                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, screenOptions: opts, excludedWindowTitles: []),
+                .microphone(microphoneID: "default", filename: "screen-mic", microphoneOptions: .init())
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
-            recorder.screenOptions = .init(fps: 60, includeAudio: false)
             """ + commonTail()
         )
 
@@ -103,13 +102,13 @@ struct RecorderDocsPanel: View {
             summary: "三路并行录制，摄像头与麦克风为独立文件",
             code: baseHeader + mkDirSnippet() + """
             let displayID = CGMainDisplayID()
+            let opts = ScreenRecorderOptions(fps: 60, includeAudio: false, showsCursor: true)
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: []),
-                .camera(cameraID: "default", filename: "cam"),
-                .microphone(microphoneID: "default", filename: "mic")
+                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, screenOptions: opts, excludedWindowTitles: []),
+                .camera(cameraID: "default", filename: "cam", cameraOptions: .init()),
+                .microphone(microphoneID: "default", filename: "mic", microphoneOptions: .init())
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
-            recorder.screenOptions = .init(fps: 60, includeAudio: false, showsCursor: true)
             """ + commonTail()
         )
 
@@ -118,11 +117,11 @@ struct RecorderDocsPanel: View {
             summary: "启用 HEVC/HDR（Display P3 10-bit），系统音频合流",
             code: baseHeader + mkDirSnippet() + """
             let displayID = CGMainDisplayID()
+            let opts = ScreenRecorderOptions(fps: 60, includeAudio: true, showsCursor: true, hdr: true, useHEVC: true)
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: nil, hdr: true, captureSystemAudio: true, filename: "screen-hdr", backend: .screenCaptureKit, excludedWindowTitles: [])
+                .display(displayID: displayID, area: nil, hdr: true, captureSystemAudio: true, filename: "screen-hdr", backend: .screenCaptureKit, screenOptions: opts, excludedWindowTitles: [])
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
-            recorder.screenOptions = .init(fps: 60, includeAudio: true, showsCursor: true, hdr: true, useHEVC: true)
             """ + commonTail()
         )
 

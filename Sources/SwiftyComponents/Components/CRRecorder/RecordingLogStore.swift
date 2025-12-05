@@ -8,6 +8,8 @@ struct RecordingLogItem: Codable, Identifiable, Equatable, Sendable {
     var clickDurationSeconds: Double?
     var videoDurationSeconds: Double?
     var offsetSeconds: Double?
+    /// Screen recording backend used for this item (`BackendChoice.rawValue`); nil for legacy entries.
+    var backend: String? = nil
     var note: String = ""
 }
 

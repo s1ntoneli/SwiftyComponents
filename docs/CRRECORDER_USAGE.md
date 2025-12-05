@@ -44,9 +44,8 @@ let scheme: CRRecorder.SchemeItem = .display(
     excludedWindowTitles: []
 )
 
-// 3) 创建并配置 CRRecorder
-let recorder = CRRecorder([scheme], outputDirectory: dir)
-recorder.screenOptions = ScreenRecorderOptions(
+// 3) 创建并配置 CRRecorder（每个屏幕方案自带 ScreenRecorderOptions）
+let options = ScreenRecorderOptions(
     fps: 60,
     queueDepth: nil,           // 为空时按分辨率自动推荐
     targetBitRate: nil,        // 为空时按分辨率与 fps 估算
@@ -55,6 +54,18 @@ recorder.screenOptions = ScreenRecorderOptions(
     hdr: false,
     useHEVC: false
 )
+let recorder = CRRecorder([
+    .display(
+        displayID: displayID,
+        area: crop,
+        hdr: false,
+        captureSystemAudio: false,
+        filename: filename,
+        backend: .screenCaptureKit,
+        screenOptions: options,
+        excludedWindowTitles: []
+    )
+], outputDirectory: dir)
 
 // 4) 启动与停止（异步）
 try await recorder.prepare([scheme])
@@ -74,10 +85,20 @@ print("Saved files:", result.bundleInfo.files.map(\_.filename))
 ## 多路采集（屏幕 + 麦克风/摄像头）
 - 通过向 `CRRecorder` 传入多个 `SchemeItem` 并行录制：
 ```swift
+let screenOpts = ScreenRecorderOptions(fps: 60, includeAudio: false)
 let schemes: [CRRecorder.SchemeItem] = [
-  .display(displayID: CGMainDisplayID(), area: nil, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: []),
-  .microphone(microphoneID: "default", filename: "mic"),
-  .camera(cameraID: "default", filename: "webcam")
+  .display(
+    displayID: CGMainDisplayID(),
+    area: nil,
+    hdr: false,
+    captureSystemAudio: false,
+    filename: "screen",
+    backend: .screenCaptureKit,
+    screenOptions: screenOpts,
+    excludedWindowTitles: []
+  ),
+  .microphone(microphoneID: "default", filename: "mic", microphoneOptions: .init()),
+  .camera(cameraID: "default", filename: "webcam", cameraOptions: .init())
 ]
 let recorder = CRRecorder(schemes, outputDirectory: dir)
 try await recorder.prepare(schemes)

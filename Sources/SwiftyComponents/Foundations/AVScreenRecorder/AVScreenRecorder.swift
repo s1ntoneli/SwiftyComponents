@@ -233,10 +233,17 @@ public final class AVScreenRecorder: NSObject, @unchecked Sendable {
                     }
                     captureDelegate = delegate
 
-                    // 映射简单编码选项：优先保持行为稳定，其次再暴露更细粒度配置。
-                    var options = CameraRecordingOptions()
-                    options.preferHEVC = false // AVScreenRecorder 传统路径默认 H.264；如需 HEVC 可后续扩展
-
+                    // 映射简单编码选项：为屏幕录制配置更接近 ScreenCaptureKit 路径的码率估算，
+                    // 以便在动态内容下文件大小/码率更接近。
+                    var options = CameraRecordingOptions(
+                        preset: nil,
+                        preferHEVC: false,
+                        bppH264: 0.012, // 与 ScreenRecorderConfig 默认 H.264 bpp 保持一致
+                        bppHEVC: 0.008, // 与 ScreenRecorderConfig 默认 HEVC bpp 保持一致
+                        minBitrate: 1_000_000,
+                        maxBitrate: 10_000_000,
+                        bitrateFPSOverride: fps
+                    )
                     backend.apply(options: options)
                     // 将首帧 PTS 与文件写入绑定到同一数据输出流。
                     backend.onFirstPTS = { [weak self] time in

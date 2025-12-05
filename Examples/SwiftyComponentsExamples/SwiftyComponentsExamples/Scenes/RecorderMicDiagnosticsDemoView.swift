@@ -377,11 +377,10 @@ struct RecorderMicDiagnosticsDemoView: View {
 
         let filename = "mic-\(id)"
         let schemes: [CRRecorder.SchemeItem] = [
-            .microphone(microphoneID: micID, filename: filename)
+            .microphone(microphoneID: micID, filename: filename, microphoneOptions: options)
         ]
 
         let recorder = CRRecorder(schemes, outputDirectory: sessionDir)
-        recorder.microphoneOptions = options
 
         do {
             try await recorder.prepare(schemes)

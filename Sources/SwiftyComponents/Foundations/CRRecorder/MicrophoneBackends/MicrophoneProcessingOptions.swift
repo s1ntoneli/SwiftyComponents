@@ -2,7 +2,7 @@ import Foundation
 
 /// Per-run microphone processing options.
 /// Default keeps behavior simple and compatible: no software processing, unity gain, mono output.
-public struct MicrophoneProcessingOptions: Sendable, Equatable {
+public struct MicrophoneProcessingOptions: Sendable, Equatable, Hashable {
     /// Enable software processing (gain / AGC / limiter). Default: false
     public var enableProcessing: Bool = false
     /// Linear gain applied before limiter/AGC / preferredVolume on writer. 1.0 = no change.

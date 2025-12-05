@@ -1,6 +1,6 @@
 import Foundation
 
-public struct ScreenRecorderOptions: Sendable, Equatable {
+public struct ScreenRecorderOptions: Sendable, Equatable, Hashable {
     public var fps: Int
     public var queueDepth: Int?
     public var targetBitRate: Int? // bps
@@ -27,4 +27,3 @@ public struct ScreenRecorderOptions: Sendable, Equatable {
         self.useHEVC = useHEVC
     }
 }
-

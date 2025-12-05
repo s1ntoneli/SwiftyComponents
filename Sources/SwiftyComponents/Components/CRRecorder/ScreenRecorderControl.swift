@@ -393,6 +393,9 @@ public struct ScreenRecorderControl: View {
                                     if let off = item.offsetSeconds {
                                         Text(String(format: "偏移: %.2fs", off)).font(.caption)
                                     }
+                                    if let backendText = historyBackendText(for: item) {
+                                        Text("Backend: \(backendText)").font(.caption)
+                                    }
                                 }
                                 HStack(spacing: 8) {
                                     Text("备注:").font(.caption)
@@ -534,17 +537,7 @@ public struct ScreenRecorderControl: View {
         sessionDir: URL
     ) async throws -> URL {
         let fileBase = baseName + "-" + suffix
-        let scheme: CRRecorder.SchemeItem = .display(
-            displayID: displayID,
-            area: area,
-            hdr: hdr,
-            captureSystemAudio: false,
-            filename: fileBase,
-            backend: backend,
-            excludedWindowTitles: []
-        )
-        let rec = CRRecorder([scheme], outputDirectory: sessionDir)
-        var opts = ScreenRecorderOptions(
+        let screenOptions = ScreenRecorderOptions(
             fps: fps,
             queueDepth: Int(queueDepthText),
             targetBitRate: Int(targetBitrateText),
@@ -553,7 +546,17 @@ public struct ScreenRecorderControl: View {
             hdr: hdr,
             useHEVC: useHEVC
         )
-        rec.screenOptions = opts
+        let scheme: CRRecorder.SchemeItem = .display(
+            displayID: displayID,
+            area: area,
+            hdr: hdr,
+            captureSystemAudio: false,
+            filename: fileBase,
+            backend: backend,
+            screenOptions: screenOptions,
+            excludedWindowTitles: []
+        )
+        let rec = CRRecorder([scheme], outputDirectory: sessionDir)
         try await rec.prepare([scheme])
         try await rec.startRecording()
         try? await Task.sleep(nanoseconds: UInt64(max(0.1, seconds) * 1_000_000_000))
@@ -576,50 +579,8 @@ public struct ScreenRecorderControl: View {
         do { try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true) } catch { }
         currentSessionDirectory = sessionDir
 
-        // Build primary scheme
-        let scheme: CRRecorder.SchemeItem
-        let backend: CRRecorder.ScreenBackend = (BackendChoice(rawValue: persistedBackend) ?? .screenCaptureKit) == .avFoundation ? .avFoundation : .screenCaptureKit
-        if mode == .window {
-            guard let widInt = selectedWindowID ?? Int(windowIDText) else { errorMessage = "Please select a window"; return }
-            scheme = .window(
-                displayId: 0,
-                windowID: CGWindowID(widInt),
-                hdr: hdr,
-                captureSystemAudio: (persistedSystemAudio || configuration.captureSystemAudio),
-                filename: fileName,
-                backend: backend
-            )
-        } else {
-            let dispID: CGDirectDisplayID = selectedDisplayID.map { CGDirectDisplayID($0) } ?? configuration.displayID
-            let area: CGRect? = (regionMode == .crop) ? configuration.cropRect : nil
-            scheme = .display(
-                displayID: dispID,
-                area: area,
-                hdr: hdr,
-                captureSystemAudio: (persistedSystemAudio || configuration.captureSystemAudio),
-                filename: fileName,
-                backend: backend,
-                excludedWindowTitles: []
-            )
-        }
-
-        // Build full schemes list (microphone optional)
-        var schemes: [CRRecorder.SchemeItem] = [scheme]
-        if persistedMicrophone || configuration.includeMicrophone {
-            // Use default microphone; save as separate audio file with -mic suffix
-            let micName = fileName + "-mic"
-            let micID = selectedMicrophoneID ?? persistedMicID
-            schemes.append(.microphone(microphoneID: micID.isEmpty ? "default" : micID, filename: micName))
-        }
-        if persistedCamera {
-            let camName = fileName + "-cam"
-            let camID = selectedCameraID ?? persistedCamID
-            schemes.append(.camera(cameraID: camID.isEmpty ? "default" : camID, filename: camName))
-        }
-
-        let rec = CRRecorder(schemes, outputDirectory: sessionDir)
-        // Pass options
-        var opts = ScreenRecorderOptions(
+        // Per-run screen options
+        let screenOptions = ScreenRecorderOptions(
             fps: fps,
             queueDepth: Int(queueDepthText),
             targetBitRate: Int(targetBitrateText),
@@ -628,7 +589,65 @@ public struct ScreenRecorderControl: View {
             hdr: hdr,
             useHEVC: useHEVC
         )
-        rec.screenOptions = opts
+        let backend: CRRecorder.ScreenBackend = (BackendChoice(rawValue: persistedBackend) ?? .screenCaptureKit) == .avFoundation ? .avFoundation : .screenCaptureKit
+
+        // Primary screen/window scheme
+        let primaryScheme: CRRecorder.SchemeItem
+        if mode == .window {
+            guard let widInt = selectedWindowID ?? Int(windowIDText) else {
+                errorMessage = "Please select a window"
+                return
+            }
+            primaryScheme = .window(
+                displayId: 0,
+                windowID: CGWindowID(widInt),
+                hdr: hdr,
+                captureSystemAudio: (persistedSystemAudio || configuration.captureSystemAudio),
+                filename: fileName,
+                backend: backend,
+                screenOptions: screenOptions
+            )
+        } else {
+            let dispID: CGDirectDisplayID = selectedDisplayID.map { CGDirectDisplayID($0) } ?? configuration.displayID
+            let area: CGRect? = (regionMode == .crop) ? configuration.cropRect : nil
+            primaryScheme = .display(
+                displayID: dispID,
+                area: area,
+                hdr: hdr,
+                captureSystemAudio: (persistedSystemAudio || configuration.captureSystemAudio),
+                filename: fileName,
+                backend: backend,
+                screenOptions: screenOptions,
+                excludedWindowTitles: []
+            )
+        }
+
+        // Optional microphone / camera schemes
+        var schemes: [CRRecorder.SchemeItem] = [primaryScheme]
+        if persistedMicrophone || configuration.includeMicrophone {
+            let micName = fileName + "-mic"
+            let micID = selectedMicrophoneID ?? persistedMicID
+            schemes.append(
+                .microphone(
+                    microphoneID: micID.isEmpty ? "default" : micID,
+                    filename: micName,
+                    microphoneOptions: .init()
+                )
+            )
+        }
+        if persistedCamera {
+            let camName = fileName + "-cam"
+            let camID = selectedCameraID ?? persistedCamID
+            schemes.append(
+                .camera(
+                    cameraID: camID.isEmpty ? "default" : camID,
+                    filename: camName,
+                    cameraOptions: .init()
+                )
+            )
+        }
+
+        let rec = CRRecorder(schemes, outputDirectory: sessionDir)
         rec.onInterupt = { err in
             DispatchQueue.main.async { self.handleInterruption(err) }
         }
@@ -938,6 +957,7 @@ public struct ScreenRecorderControl: View {
                 clickDurationSeconds: click,
                 videoDurationSeconds: video,
                 offsetSeconds: off,
+                backend: persistedBackend,
                 note: ""
             )
             logs.append(item)
@@ -949,6 +969,16 @@ public struct ScreenRecorderControl: View {
             return l > r
         })
         saveLogs()
+    }
+
+    /// 把历史项里保存的 backend(rawValue) 映射成可读名称。
+    private func historyBackendText(for item: RecordingLogItem) -> String? {
+        guard let raw = item.backend else { return nil }
+        guard let choice = BackendChoice(rawValue: raw) else { return raw }
+        switch choice {
+        case .screenCaptureKit: return "ScreenCaptureKit"
+        case .avFoundation: return "AVFoundation"
+        }
     }
 
     // 同步加载 AVURLAsset 时长（秒）
