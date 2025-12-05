@@ -46,9 +46,10 @@ struct RecorderDocsPanel: View {
             // 方案：显示器 + 区域
             let displayID = CGMainDisplayID()
             let crop = CGRect(x: 0, y: 0, width: 800, height: 600)
-            let opts = ScreenRecorderOptions(fps: 60, includeAudio: false, showsCursor: true)
+            let optsFPS = 60
+            let optsShowsCursor = true
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: crop, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, screenOptions: opts, excludedWindowTitles: [])
+                .display(displayID: displayID, area: crop, fps: optsFPS, showsCursor: optsShowsCursor, hdr: false, useHEVC: false, captureSystemAudio: false, queueDepth: nil, targetBitRate: nil, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: [])
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
             
@@ -60,9 +61,10 @@ struct RecorderDocsPanel: View {
             summary: "系统音频随屏幕写入到同一个 .mov",
             code: baseHeader + mkDirSnippet() + """
             let displayID = CGMainDisplayID()
-            let opts = ScreenRecorderOptions(fps: 60, includeAudio: true, showsCursor: true)
+            let optsFPS = 60
+            let optsShowsCursor = true
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: true, filename: "screen", backend: .screenCaptureKit, screenOptions: opts, excludedWindowTitles: [])
+                .display(displayID: displayID, area: nil, fps: optsFPS, showsCursor: optsShowsCursor, hdr: false, useHEVC: false, captureSystemAudio: true, queueDepth: nil, targetBitRate: nil, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: [])
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
             """ + commonTail()
@@ -75,9 +77,9 @@ struct RecorderDocsPanel: View {
             // 取前台窗口ID（示例：自行替换为目标窗口）
             let content = try await SCShareableContent.current
             guard let win = content.windows.first else { throw NSError(domain: "Demo", code: -1) }
-            let opts = ScreenRecorderOptions(fps: 60, includeAudio: false)
+            let optsFPS = 60
             let schemes: [CRRecorder.SchemeItem] = [
-                .window(displayId: 0, windowID: win.windowID, hdr: false, captureSystemAudio: false, filename: "window", backend: .screenCaptureKit, screenOptions: opts)
+                .window(displayId: 0, windowID: win.windowID, fps: optsFPS, showsCursor: true, hdr: false, captureSystemAudio: false, filename: "window", backend: .screenCaptureKit, queueDepth: nil, targetBitRate: nil)
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
             """ + commonTail()
@@ -88,9 +90,9 @@ struct RecorderDocsPanel: View {
             summary: "屏幕视频 + 独立 .m4a 麦克风文件",
             code: baseHeader + mkDirSnippet() + """
             let displayID = CGMainDisplayID()
-            let opts = ScreenRecorderOptions(fps: 60, includeAudio: false)
+            let optsFPS = 60
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, screenOptions: opts, excludedWindowTitles: []),
+                .display(displayID: displayID, area: nil, fps: optsFPS, showsCursor: false, hdr: false, useHEVC: false, captureSystemAudio: false, queueDepth: nil, targetBitRate: nil, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: []),
                 .microphone(microphoneID: "default", filename: "screen-mic", microphoneOptions: .init())
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
@@ -102,9 +104,10 @@ struct RecorderDocsPanel: View {
             summary: "三路并行录制，摄像头与麦克风为独立文件",
             code: baseHeader + mkDirSnippet() + """
             let displayID = CGMainDisplayID()
-            let opts = ScreenRecorderOptions(fps: 60, includeAudio: false, showsCursor: true)
+            let optsFPS = 60
+            let optsShowsCursor = true
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: nil, hdr: false, captureSystemAudio: false, filename: "screen", backend: .screenCaptureKit, screenOptions: opts, excludedWindowTitles: []),
+                .display(displayID: displayID, area: nil, fps: optsFPS, showsCursor: optsShowsCursor, hdr: false, useHEVC: false, captureSystemAudio: false, queueDepth: nil, targetBitRate: nil, filename: "screen", backend: .screenCaptureKit, excludedWindowTitles: []),
                 .camera(cameraID: "default", filename: "cam", cameraOptions: .init()),
                 .microphone(microphoneID: "default", filename: "mic", microphoneOptions: .init())
             ]
@@ -117,9 +120,10 @@ struct RecorderDocsPanel: View {
             summary: "启用 HEVC/HDR（Display P3 10-bit），系统音频合流",
             code: baseHeader + mkDirSnippet() + """
             let displayID = CGMainDisplayID()
-            let opts = ScreenRecorderOptions(fps: 60, includeAudio: true, showsCursor: true, hdr: true, useHEVC: true)
+            let optsFPS = 60
+            let optsShowsCursor = true
             let schemes: [CRRecorder.SchemeItem] = [
-                .display(displayID: displayID, area: nil, hdr: true, captureSystemAudio: true, filename: "screen-hdr", backend: .screenCaptureKit, screenOptions: opts, excludedWindowTitles: [])
+                .display(displayID: displayID, area: nil, fps: optsFPS, showsCursor: optsShowsCursor, hdr: true, useHEVC: true, captureSystemAudio: true, queueDepth: nil, targetBitRate: nil, filename: "screen-hdr", backend: .screenCaptureKit, excludedWindowTitles: [])
             ]
             let recorder = CRRecorder(schemes, outputDirectory: session)
             """ + commonTail()

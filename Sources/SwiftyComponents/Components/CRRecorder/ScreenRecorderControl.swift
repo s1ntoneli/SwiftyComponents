@@ -537,23 +537,18 @@ public struct ScreenRecorderControl: View {
         sessionDir: URL
     ) async throws -> URL {
         let fileBase = baseName + "-" + suffix
-        let screenOptions = ScreenRecorderOptions(
-            fps: fps,
-            queueDepth: Int(queueDepthText),
-            targetBitRate: Int(targetBitrateText),
-            includeAudio: false,
-            showsCursor: showsCursor,
-            hdr: hdr,
-            useHEVC: useHEVC
-        )
         let scheme: CRRecorder.SchemeItem = .display(
             displayID: displayID,
             area: area,
+            fps: fps,
+            showsCursor: showsCursor,
             hdr: hdr,
+            useHEVC: useHEVC,
             captureSystemAudio: false,
+            queueDepth: Int(queueDepthText),
+            targetBitRate: Int(targetBitrateText),
             filename: fileBase,
             backend: backend,
-            screenOptions: screenOptions,
             excludedWindowTitles: []
         )
         let rec = CRRecorder([scheme], outputDirectory: sessionDir)
@@ -579,16 +574,6 @@ public struct ScreenRecorderControl: View {
         do { try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true) } catch { }
         currentSessionDirectory = sessionDir
 
-        // Per-run screen options
-        let screenOptions = ScreenRecorderOptions(
-            fps: fps,
-            queueDepth: Int(queueDepthText),
-            targetBitRate: Int(targetBitrateText),
-            includeAudio: (persistedSystemAudio || configuration.captureSystemAudio),
-            showsCursor: showsCursor,
-            hdr: hdr,
-            useHEVC: useHEVC
-        )
         let backend: CRRecorder.ScreenBackend = (BackendChoice(rawValue: persistedBackend) ?? .screenCaptureKit) == .avFoundation ? .avFoundation : .screenCaptureKit
 
         // Primary screen/window scheme
@@ -601,11 +586,14 @@ public struct ScreenRecorderControl: View {
             primaryScheme = .window(
                 displayId: 0,
                 windowID: CGWindowID(widInt),
+                fps: fps,
+                showsCursor: showsCursor,
                 hdr: hdr,
                 captureSystemAudio: (persistedSystemAudio || configuration.captureSystemAudio),
                 filename: fileName,
                 backend: backend,
-                screenOptions: screenOptions
+                queueDepth: Int(queueDepthText),
+                targetBitRate: Int(targetBitrateText)
             )
         } else {
             let dispID: CGDirectDisplayID = selectedDisplayID.map { CGDirectDisplayID($0) } ?? configuration.displayID
@@ -613,11 +601,15 @@ public struct ScreenRecorderControl: View {
             primaryScheme = .display(
                 displayID: dispID,
                 area: area,
+                fps: fps,
+                showsCursor: showsCursor,
                 hdr: hdr,
+                useHEVC: useHEVC,
                 captureSystemAudio: (persistedSystemAudio || configuration.captureSystemAudio),
+                queueDepth: Int(queueDepthText),
+                targetBitRate: Int(targetBitrateText),
                 filename: fileName,
                 backend: backend,
-                screenOptions: screenOptions,
                 excludedWindowTitles: []
             )
         }

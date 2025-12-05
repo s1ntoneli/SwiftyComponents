@@ -43,16 +43,19 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
             throw RecordingError.recordingFailed("Can't find display with ID \(displayID)")
         }
-        var opts = options
-        opts.hdr = hdr
-        opts.showsCursor = showsCursor
-        opts.includeAudio = includeAudio
+        let opts = options
         // 基于本次录制配置传入的标题列表，屏蔽对应窗口
         let excluded = Self.windows(withTitles: Set(excludedWindowTitles), in: content)
         let filter = SCContentFilter(display: display, excludingWindows: excluded)
-        let config = try RecorderConfig.make(for: display, cropRect: cropRect, options: opts)
-        try prepareWriter(urlPath: filePath, configuration: config, options: opts)
-        try startStream(configuration: config, filter: filter, options: opts)
+        let config = try RecorderConfig.make(
+            for: display,
+            cropRect: cropRect,
+            hdr: hdr,
+            captureSystemAudio: includeAudio,
+            options: opts
+        )
+        try prepareWriter(urlPath: filePath, configuration: config, hdr: hdr, includeAudio: includeAudio, options: opts)
+        try startStream(configuration: config, filter: filter, includeAudio: includeAudio)
         let file = URL(fileURLWithPath: filePath)
         return [CRRecorder.BundleInfo.FileAsset(filename: file.lastPathComponent, tyle: .screen, recordingStartTimestamp: firstFrameTimestamp)]
     }
@@ -62,6 +65,7 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         windowID: CGWindowID,
         displayID: CGDirectDisplayID?,
         hdr: Bool,
+        showsCursor: Bool,
         includeAudio: Bool,
         frameRate: Int = 30,
         h265: Bool = false
@@ -72,14 +76,19 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
             throw RecordingError.recordingFailed("Can't find window with ID \(windowID)")
         }
         var opts = options
-        opts.hdr = hdr
-        opts.includeAudio = includeAudio
         opts.fps = frameRate
+        // Per-run 光标可见性由上层 Scheme 控制，这里在原始 options 基础上覆盖一次。
+        opts.showsCursor = showsCursor
         opts.useHEVC = (opts.useHEVC || h265)
         let filter = SCContentFilter(desktopIndependentWindow: window)
-        let config = RecorderConfig.make(for: window, options: opts)
-        try prepareWriter(urlPath: filePath, configuration: config, options: opts)
-        try startStream(configuration: config, filter: filter, options: opts)
+        let config = RecorderConfig.make(
+            for: window,
+            hdr: hdr,
+            captureSystemAudio: includeAudio,
+            options: opts
+        )
+        try prepareWriter(urlPath: filePath, configuration: config, hdr: hdr, includeAudio: includeAudio, options: opts)
+        try startStream(configuration: config, filter: filter, includeAudio: includeAudio)
         let file = URL(fileURLWithPath: filePath)
         return [CRRecorder.BundleInfo.FileAsset(filename: file.lastPathComponent, tyle: .screen, recordingStartTimestamp: firstFrameTimestamp)]
     }
@@ -99,15 +108,31 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
     }
 
     // MARK: - Internals
-    private func prepareWriter(urlPath: String, configuration: SCStreamConfiguration, options: ScreenRecorderOptions) throws {
+    private func prepareWriter(
+        urlPath: String,
+        configuration: SCStreamConfiguration,
+        hdr: Bool,
+        includeAudio: Bool,
+        options: ScreenRecorderOptions
+    ) throws {
         var url = URL(fileURLWithPath: urlPath)
         if url.pathExtension.isEmpty { url.appendPathExtension("mov") }
         self.filePath = url.path
-        self.writer = try WriterPipeline.create(url: url, configuration: configuration, options: options)
+        self.writer = try WriterPipeline.create(
+            url: url,
+            configuration: configuration,
+            hdr: hdr,
+            includeAudio: includeAudio,
+            options: options
+        )
         RecorderDiagnostics.shared.setOutputFileURL(url)
     }
 
-    private func startStream(configuration: SCStreamConfiguration, filter: SCContentFilter, options: ScreenRecorderOptions) throws {
+    private func startStream(
+        configuration: SCStreamConfiguration,
+        filter: SCContentFilter,
+        includeAudio: Bool
+    ) throws {
         let out = StreamOutput()
         // 进入写入前，允许接收新样本
         allowAppend = true
@@ -148,7 +173,9 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         // 使用同一个串行队列处理音视频样本，降低跨队列并发带来的写入竞争
         let sampleQueue = DispatchQueue(label: "com.swiftycomponents.screen.sample")
         try stream.addStreamOutput(out, type: .screen, sampleHandlerQueue: sampleQueue)
-        if options.includeAudio { try stream.addStreamOutput(out, type: .audio, sampleHandlerQueue: sampleQueue) }
+        if includeAudio {
+            try stream.addStreamOutput(out, type: .audio, sampleHandlerQueue: sampleQueue)
+        }
         RecorderDiagnostics.shared.onStartCapture(configuration: configuration)
         stream.startCapture()
         self.stream = stream

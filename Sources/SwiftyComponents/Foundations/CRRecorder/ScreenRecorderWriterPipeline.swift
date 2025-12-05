@@ -22,19 +22,25 @@ final class WriterPipeline {
         self.didStartSession = didStartSession
     }
 
-    static func create(url: URL, configuration: SCStreamConfiguration, options: ScreenRecorderOptions) throws -> WriterPipeline {
+    static func create(
+        url: URL,
+        configuration: SCStreamConfiguration,
+        hdr: Bool,
+        includeAudio: Bool,
+        options: ScreenRecorderOptions
+    ) throws -> WriterPipeline {
         let writer = try AVAssetWriter(url: url, fileType: .mov)
         writer.movieFragmentInterval = CMTime(seconds: RecorderDiagnostics.shared.fragmentIntervalSeconds, preferredTimescale: 600)
 
         let size = (width: configuration.width, height: configuration.height)
-        let vSettings = try RecorderConfig.videoSettings(for: size, configuration: configuration, options: options)
+        let vSettings = try RecorderConfig.videoSettings(for: size, configuration: configuration, hdr: hdr, options: options)
         let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: vSettings)
         vInput.expectsMediaDataInRealTime = true
         guard writer.canAdd(vInput) else { throw RecordingError.recordingFailed("Can't add video input") }
         writer.add(vInput)
 
         var aInput: AVAssetWriterInput? = nil
-        if options.includeAudio {
+        if includeAudio {
             let aSettings = RecorderConfig.audioSettings()
             let input = AVAssetWriterInput(mediaType: .audio, outputSettings: aSettings)
             input.expectsMediaDataInRealTime = true

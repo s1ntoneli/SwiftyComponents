@@ -359,21 +359,15 @@ final class RecorderAutoTester: ObservableObject {
         }
 
         // Per-run screen options
-        var screenOptions = ScreenRecorderOptions(
-            fps: 60,
-            queueDepth: nil,
-            targetBitRate: nil,
-            includeAudio: captureSystemAudio,
-            showsCursor: true,
-            hdr: false,
-            useHEVC: false
-        )
+        var fps = 60
+        var showsCursor = true
+        var useHEVC = false
         switch scenario.id {
-        case .highFPS120: screenOptions.fps = 120
-        case .lowFPS15: screenOptions.fps = 15
-        case .hevcHDR: screenOptions.hdr = true; screenOptions.useHEVC = true
-        case .cursorOn: screenOptions.showsCursor = true
-        case .cursorOff: screenOptions.showsCursor = false
+        case .highFPS120: fps = 120
+        case .lowFPS15: fps = 15
+        case .hevcHDR: useHEVC = true
+        case .cursorOn: showsCursor = true
+        case .cursorOff: showsCursor = false
         default: break
         }
 
@@ -382,11 +376,15 @@ final class RecorderAutoTester: ObservableObject {
                 .display(
                     displayID: config.displayID,
                     area: config.cropRect,
+                    fps: fps,
+                    showsCursor: showsCursor,
                     hdr: false,
+                    useHEVC: useHEVC,
                     captureSystemAudio: captureSystemAudio,
+                    queueDepth: nil,
+                    targetBitRate: nil,
                     filename: dirName,
                     backend: config.backend,
-                    screenOptions: screenOptions,
                     excludedWindowTitles: []
                 )
             )
@@ -605,23 +603,18 @@ final class RecorderAutoTester: ObservableObject {
             suffix: String
         ) async throws -> URL {
             let baseName = dirName + "-" + suffix
-            let screenOptions = ScreenRecorderOptions(
-                fps: fps,
-                queueDepth: nil,
-                targetBitRate: nil,
-                includeAudio: false,
-                showsCursor: showsCursor,
-                hdr: hdr,
-                useHEVC: useHEVC
-            )
             let scheme: CRRecorder.SchemeItem = .display(
                 displayID: config.displayID,
                 area: area,
+                fps: fps,
+                showsCursor: showsCursor,
                 hdr: hdr,
+                useHEVC: useHEVC,
                 captureSystemAudio: false,
+                queueDepth: nil,
+                targetBitRate: nil,
                 filename: baseName,
                 backend: backend,
-                screenOptions: screenOptions,
                 excludedWindowTitles: []
             )
             let rec = CRRecorder([scheme], outputDirectory: sessionDir)

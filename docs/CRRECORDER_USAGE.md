@@ -22,7 +22,7 @@
 - `ScreenCaptureRecorder`：封装 ScreenCaptureKit 流 → 写入器（WriterPipeline）。
 - `WriterPipeline`：`AVAssetWriter` 写入管线（视频/音频输入、会话启动、收尾）。
 - `SchemeItem`：要录制的来源枚举：`.display`、`.window`、`.camera`、`.microphone`、`.appleDevice`。
-- `ScreenRecorderOptions`：帧率、是否包含音频、光标、HEVC/HDR、queueDepth、目标码率等。
+- 屏幕编码调优参数（帧率、光标、HEVC 以及 queueDepth / 目标码率等）均通过 `CRRecorder.SchemeItem.display/window` 的参数直接传入，内部会自动推导合适的配置。
 - `CRRecorder.Result/BundleInfo`：返回的录制结果与文件清单（可直接用于 UI 展示或自动化收集）。
 
 ## 快速开始（仅屏幕/窗口）
@@ -44,25 +44,19 @@ let scheme: CRRecorder.SchemeItem = .display(
     excludedWindowTitles: []
 )
 
-// 3) 创建并配置 CRRecorder（每个屏幕方案自带 ScreenRecorderOptions）
-let options = ScreenRecorderOptions(
-    fps: 60,
-    queueDepth: nil,           // 为空时按分辨率自动推荐
-    targetBitRate: nil,        // 为空时按分辨率与 fps 估算
-    includeAudio: false,
-    showsCursor: true,
-    hdr: false,
-    useHEVC: false
-)
+// 3) 创建并配置 CRRecorder（通过 Scheme 直接传递帧率/光标/HEVC 等参数）
 let recorder = CRRecorder([
     .display(
         displayID: displayID,
         area: crop,
+        fps: 60,
+        showsCursor: true,
         hdr: false,
         captureSystemAudio: false,
+        queueDepth: nil,           // 为空时按分辨率自动推荐
+        targetBitRate: nil,        // 为空时按分辨率与 fps 估算
         filename: filename,
         backend: .screenCaptureKit,
-        screenOptions: options,
         excludedWindowTitles: []
     )
 ], outputDirectory: dir)
@@ -85,16 +79,19 @@ print("Saved files:", result.bundleInfo.files.map(\_.filename))
 ## 多路采集（屏幕 + 麦克风/摄像头）
 - 通过向 `CRRecorder` 传入多个 `SchemeItem` 并行录制：
 ```swift
-let screenOpts = ScreenRecorderOptions(fps: 60, includeAudio: false)
+let screenFPS = 60
 let schemes: [CRRecorder.SchemeItem] = [
   .display(
     displayID: CGMainDisplayID(),
     area: nil,
+    fps: screenFPS,
+    showsCursor: true,
     hdr: false,
     captureSystemAudio: false,
+    queueDepth: nil,
+    targetBitRate: nil,
     filename: "screen",
     backend: .screenCaptureKit,
-    screenOptions: screenOpts,
     excludedWindowTitles: []
   ),
   .microphone(microphoneID: "default", filename: "mic", microphoneOptions: .init()),
@@ -136,7 +133,7 @@ let result = try await recorder.stopRecordingWithResult()
 
 ## 配置要点与建议
 - 帧率与分辨率：
-  - 通过 `ScreenRecorderOptions.fps` 与 `ScreenRecorderConfig` 自动裁剪/降维，避免过大尺寸导致丢帧。
+  - 通过 Scheme 中的 fps 与内部 `ScreenRecorderConfig` 自动裁剪/降维，避免过大尺寸导致丢帧。
   - `queueDepth` 留空时按分辨率/fps 推荐；高分辨率 + 高 fps 适度增大。
 - 编码：
   - H.264 + sRGB 默认；开启 HEVC/HDR 将切换 HEVC + Display P3。

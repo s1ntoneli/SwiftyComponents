@@ -26,6 +26,7 @@ protocol ScreenRecorderBackend: AnyObject, Sendable {
         windowID: CGWindowID,
         displayID: CGDirectDisplayID?,
         hdr: Bool,
+        showsCursor: Bool,
         includeAudio: Bool,
         frameRate: Int,
         h265: Bool
@@ -100,6 +101,7 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
         windowID: CGWindowID,
         displayID: CGDirectDisplayID?,
         hdr: Bool,
+        showsCursor: Bool,
         includeAudio: Bool,
         frameRate: Int,
         h265: Bool
@@ -111,7 +113,7 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
         let config = AVScreenRecorder.Configuration(
             displayID: resolvedDisplay,
             cropRect: bounds,
-            showsCursor: options.showsCursor,
+            showsCursor: showsCursor,
             capturesMouseClicks: false,
             fps: frameRate
         )

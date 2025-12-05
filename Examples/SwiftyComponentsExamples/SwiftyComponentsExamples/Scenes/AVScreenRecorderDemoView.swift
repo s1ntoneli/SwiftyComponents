@@ -643,23 +643,18 @@ private func runScreenCaptureKitParity(
     baseFilename: String,
     outputDirectory: URL
 ) async throws -> URL {
-    let screenOptions = ScreenRecorderOptions(
-        fps: fps,
-        queueDepth: nil,
-        targetBitRate: nil,
-        includeAudio: false,
-        showsCursor: false,
-        hdr: false,
-        useHEVC: false
-    )
     let scheme = CRRecorder.SchemeItem.display(
         displayID: displayID,
         area: cropRect,
+        fps: fps,
+        showsCursor: false,
         hdr: false,
+        useHEVC: false,
         captureSystemAudio: false,
+        queueDepth: nil,
+        targetBitRate: nil,
         filename: baseFilename,
         backend: .screenCaptureKit,
-        screenOptions: screenOptions,
         excludedWindowTitles: []
     )
     let recorder = CRRecorder([scheme], outputDirectory: outputDirectory)

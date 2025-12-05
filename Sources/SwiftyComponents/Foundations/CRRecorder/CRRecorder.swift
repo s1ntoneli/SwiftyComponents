@@ -53,12 +53,52 @@ public class CRRecorder: @unchecked Sendable {
         for scheme in schemes {
             print("[CRRecorder] 准备录制方案: \(scheme.id)")
             switch scheme {
-            case .display(let displayId, let area, let hdr, let captureSystemAudio, let filename, let backend, let screenOptions, let excludedWindowTitles):
+            case .display(
+                let displayId,
+                let area,
+                let fps,
+                let showsCursor,
+                let hdr,
+                let useHEVC,
+                let captureSystemAudio,
+                let queueDepth,
+                let targetBitRate,
+                let filename,
+                let backend,
+                let excludedWindowTitles
+            ):
                 print("[CRRecorder] 准备屏幕录制 - 显示器ID: \(displayId), 文件名: \(filename), HDR: \(hdr), 系统音频: \(captureSystemAudio)")
-                screenCaptureSessions = makeScreenBackend(backend: backend, filename: filename, options: screenOptions)
-            case .window(displayId: let displayId, windowID: let windowID, hdr: let hdr, captureSystemAudio: let captureSystemAudio, filename: let filename, let backend, let screenOptions):
+                screenCaptureSessions = makeScreenBackend(
+                    backend: backend,
+                    filename: filename,
+                    fps: fps,
+                    queueDepth: queueDepth,
+                    targetBitRate: targetBitRate,
+                    showsCursor: showsCursor,
+                    useHEVC: useHEVC
+                )
+            case .window(
+                displayId: let displayId,
+                windowID: let windowID,
+                let fps,
+                let showsCursor,
+                hdr: let hdr,
+                captureSystemAudio: let captureSystemAudio,
+                filename: let filename,
+                let backend,
+                let queueDepth,
+                let targetBitRate
+            ):
                 print("[CRRecorder] 准备窗口录制 - 显示器ID: \(displayId), 窗口ID: \(windowID), 文件名: \(filename)")
-                screenCaptureSessions = makeScreenBackend(backend: backend, filename: filename, options: screenOptions)
+                screenCaptureSessions = makeScreenBackend(
+                    backend: backend,
+                    filename: filename,
+                    fps: fps,
+                    queueDepth: queueDepth,
+                    targetBitRate: targetBitRate,
+                    showsCursor: showsCursor,
+                    useHEVC: false
+                )
             case .camera(cameraID: let cameraID, filename: let filename, let cameraOptions):
                 print("[CRRecorder] 准备摄像头录制 - 摄像头ID: \(cameraID), 文件名: \(filename)")
 //                prepareCameraSession(cameraID: cameraID, filename: filename)
@@ -195,11 +235,15 @@ public class CRRecorder: @unchecked Sendable {
         case .display(
             displayID: let displayID,
             area: let area,
+            fps: _,
+            showsCursor: let showsCursor,
             hdr: let hdr,
+            useHEVC: _,
             captureSystemAudio: let captureSystemAudio,
+            queueDepth: _,
+            targetBitRate: _,
             filename: _,
             backend: _,
-            screenOptions: let screenOptions,
             excludedWindowTitles: let excludedWindowTitles
         ):
             // 在 prepare 阶段已根据 backend 初始化好 screenCaptureSessions，这里直接启动。
@@ -207,26 +251,30 @@ public class CRRecorder: @unchecked Sendable {
                 displayID: displayID,
                 cropRect: area,
                 hdr: hdr,
-                showsCursor: screenOptions.showsCursor,
+                showsCursor: showsCursor,
                 includeAudio: captureSystemAudio,
                 excludedWindowTitles: excludedWindowTitles
             )
         case .window(
             displayId: let displayId,
             windowID: let windowID,
+            fps: let fps,
+            showsCursor: let showsCursor,
             hdr: let hdr,
             captureSystemAudio: let captureSystemAudio,
             filename: _,
             backend: _,
-            screenOptions: let screenOptions
+            queueDepth: _,
+            targetBitRate: _
         ):
             _ = try await screenCaptureSessions?.startWindowCapture(
                 windowID: windowID,
                 displayID: displayId,
                 hdr: hdr,
+                showsCursor: showsCursor,
                 includeAudio: captureSystemAudio,
-                frameRate: screenOptions.fps,
-                h265: screenOptions.useHEVC
+                frameRate: fps,
+                h265: false
             )
         case .camera(cameraID: let cameraID, filename: let filename, cameraOptions: _):
             if let cameraCapture = cameraCaptures[cameraID] {
@@ -280,41 +328,49 @@ public class CRRecorder: @unchecked Sendable {
         
         switch scheme {
         case .display(
-            let displayId,
-            let area,
-            let hdr,
-            let captureSystemAudio,
-            let filename,
-            let backend,
-            let screenOptions,
-            let excludedWindowTitles
+            displayID: let displayId,
+            area: let area,
+            fps: let fps,
+            showsCursor: let showsCursor,
+            hdr: let hdr,
+            useHEVC: let useHEVC,
+            captureSystemAudio: let captureSystemAudio,
+            queueDepth: let queueDepth,
+            targetBitRate: let targetBitRate,
+            filename: let filename,
+            backend: let backend,
+            excludedWindowTitles: let excludedWindowTitles
         ):
             print("[CRRecorder] 开始屏幕录制")
             return try await screenCaptureSessions?.startScreenCapture(
                 displayID: displayId,
                 cropRect: area,
                 hdr: hdr,
-                showsCursor: screenOptions.showsCursor,
+                showsCursor: showsCursor,
                 includeAudio: captureSystemAudio,
                 excludedWindowTitles: excludedWindowTitles
             ) ?? []
         case .window(
             displayId: let displayId,
             windowID: let windowID,
+            let fps,
+            let showsCursor,
             hdr: let hdr,
             captureSystemAudio: let captureSystemAudio,
             filename: let filename,
             let backend,
-            let screenOptions
+            let queueDepth,
+            let targetBitRate
         ):
             print("[CRRecorder] 开始窗口录制")
             return try await screenCaptureSessions?.startWindowCapture(
                 windowID: windowID,
                 displayID: displayId,
                 hdr: hdr,
+                showsCursor: showsCursor,
                 includeAudio: captureSystemAudio,
-                frameRate: screenOptions.fps,
-                h265: screenOptions.useHEVC
+                frameRate: fps,
+                h265: false
             ) ?? []
         case .camera(cameraID: let cameraID, filename: let filename, cameraOptions: _):
             print("[CRRecorder] 开始摄像头录制")
@@ -452,21 +508,28 @@ public class CRRecorder: @unchecked Sendable {
         case display(
             displayID: CGDirectDisplayID,
             area: CGRect?,
+            fps: Int,
+            showsCursor: Bool,
             hdr: Bool,
+            useHEVC: Bool,
             captureSystemAudio: Bool,
+            queueDepth: Int?,
+            targetBitRate: Int?,
             filename: String,
             backend: ScreenBackend,
-            screenOptions: ScreenRecorderOptions,
             excludedWindowTitles: [String]
         )
         case window(
             displayId: CGDirectDisplayID,
             windowID: CGWindowID,
+            fps: Int,
+            showsCursor: Bool,
             hdr: Bool,
             captureSystemAudio: Bool,
             filename: String,
             backend: ScreenBackend,
-            screenOptions: ScreenRecorderOptions
+            queueDepth: Int?,
+            targetBitRate: Int?
         )
         case camera(
             cameraID: String,
@@ -486,9 +549,9 @@ public class CRRecorder: @unchecked Sendable {
         
         public var id: String {
             switch self {
-            case .display(let displayId, _, _, _, _, _, _, _):
+            case .display(let displayId, _, _, _, _, _, _, _, _, _, _, _):
                 return "display_\(displayId)"
-            case .window(let displayId, let windowID, _, _, _, _, _):
+            case .window(let displayId, let windowID, _, _, _, _, _, _, _, _):
                 return "window_\(displayId)_\(windowID)"
             case .camera(let cameraID, _, _):
                 return "camera_\(cameraID)"
@@ -558,8 +621,20 @@ extension CRRecorder {
     fileprivate func makeScreenBackend(
         backend: ScreenBackend,
         filename: String,
-        options: ScreenRecorderOptions
+        fps: Int,
+        queueDepth: Int?,
+        targetBitRate: Int?,
+        showsCursor: Bool,
+        useHEVC: Bool
     ) -> ScreenRecorderBackend {
+        // 内部仍然使用 ScreenRecorderOptions 作为聚合体，但该类型不再暴露给外部 API。
+        let options = ScreenRecorderOptions(
+            fps: fps,
+            queueDepth: queueDepth,
+            targetBitRate: targetBitRate,
+            showsCursor: showsCursor,
+            useHEVC: useHEVC
+        )
         let filePath = outputDirectory
             .appendingPathComponent(filename)
             .appendingPathExtension("mov")

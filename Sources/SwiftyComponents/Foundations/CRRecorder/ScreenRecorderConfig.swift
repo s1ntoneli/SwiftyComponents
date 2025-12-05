@@ -5,12 +5,22 @@ import ScreenCaptureKit
 enum RecordMode { case h264_sRGB, hevc_displayP3 }
 
 enum RecorderConfig {
-    static func make(for display: SCDisplay, cropRect: CGRect?, options: ScreenRecorderOptions) throws -> SCStreamConfiguration {
+    static func make(
+        for display: SCDisplay,
+        cropRect: CGRect?,
+        hdr: Bool,
+        captureSystemAudio: Bool,
+        options: ScreenRecorderOptions
+    ) throws -> SCStreamConfiguration {
         let size = display.frame.size
         let scale = displayScaleFactor(display.displayID)
         let c = SCStreamConfiguration()
         c.showsCursor = options.showsCursor
-        c.capturesAudio = options.includeAudio
+        c.capturesAudio = captureSystemAudio
+        if captureSystemAudio {
+            c.sampleRate = 48000
+            c.channelCount = 2
+        }
         c.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(options.fps))
         if let crop = cropRect {
             c.sourceRect = crop
@@ -20,7 +30,7 @@ enum RecorderConfig {
             c.width = Int(size.width) * scale
             c.height = Int(size.height) * scale
         }
-        let mode: RecordMode = (options.useHEVC || options.hdr) ? .hevc_displayP3 : .h264_sRGB
+        let mode: RecordMode = (options.useHEVC || hdr) ? .hevc_displayP3 : .h264_sRGB
         let (w, h) = applyMaxDimensions(width: c.width, height: c.height, max: mode.maxSize)
         c.width = w; c.height = h
         c.queueDepth = options.queueDepth ?? recommendedQueueDepth(width: w, height: h, fps: options.fps)
@@ -31,18 +41,25 @@ enum RecorderConfig {
         return c
     }
 
-    static func make(for window: SCWindow, options: ScreenRecorderOptions) -> SCStreamConfiguration {
+    static func make(
+        for window: SCWindow,
+        hdr: Bool,
+        captureSystemAudio: Bool,
+        options: ScreenRecorderOptions
+    ) -> SCStreamConfiguration {
         let c = SCStreamConfiguration()
         let scale = windowScale(window)
         c.width = Int(window.frame.width) * Int(scale)
         c.height = Int(window.frame.height) * Int(scale)
         c.showsCursor = options.showsCursor
-        c.capturesAudio = options.includeAudio
-        c.sampleRate = 48000
-        c.channelCount = 2
+        c.capturesAudio = captureSystemAudio
+        if captureSystemAudio {
+            c.sampleRate = 48000
+            c.channelCount = 2
+        }
         c.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(options.fps))
         c.queueDepth = options.queueDepth ?? recommendedQueueDepth(width: c.width, height: c.height, fps: options.fps)
-        let mode: RecordMode = (options.useHEVC || options.hdr) ? .hevc_displayP3 : .h264_sRGB
+        let mode: RecordMode = (options.useHEVC || hdr) ? .hevc_displayP3 : .h264_sRGB
         switch mode {
         case .h264_sRGB: c.pixelFormat = kCVPixelFormatType_32BGRA; c.colorSpaceName = CGColorSpace.sRGB
         case .hevc_displayP3: c.pixelFormat = kCVPixelFormatType_ARGB2101010LEPacked; c.colorSpaceName = CGColorSpace.displayP3
@@ -50,8 +67,13 @@ enum RecorderConfig {
         return c
     }
 
-    static func videoSettings(for size: (width: Int, height: Int), configuration: SCStreamConfiguration, options: ScreenRecorderOptions) throws -> [String: Any] {
-        let mode: RecordMode = (options.useHEVC || options.hdr) ? .hevc_displayP3 : .h264_sRGB
+    static func videoSettings(
+        for size: (width: Int, height: Int),
+        configuration: SCStreamConfiguration,
+        hdr: Bool,
+        options: ScreenRecorderOptions
+    ) throws -> [String: Any] {
+        let mode: RecordMode = (options.useHEVC || hdr) ? .hevc_displayP3 : .h264_sRGB
         guard let assistant = AVOutputSettingsAssistant(preset: mode.preset) else {
             throw RecordingError.recordingFailed("Can't create AVOutputSettingsAssistant")
         }
