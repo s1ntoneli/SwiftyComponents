@@ -48,6 +48,12 @@ struct AVScreenRecorderDemoView: View {
     // Audio capture is not supported in this AVScreenRecorder demo.
     // Use CRRecorder / ScreenRecorderControl for system audio + microphone.
 
+    // Parity test (ScreenCaptureKit vs AVFoundation)
+    @State private var parityDurationText: String = "600" // seconds (default 10 minutes)
+    @State private var isRunningParityTest: Bool = false
+    @State private var parityResult: ParityResult?
+    @State private var parityErrorMessage: String?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             header
@@ -55,6 +61,7 @@ struct AVScreenRecorderDemoView: View {
             modeControls
             targetSelection
             cropControls
+            parityTestSection
             recordingControls
             resultSection
             Spacer()
@@ -236,6 +243,43 @@ struct AVScreenRecorderDemoView: View {
         }
     }
 
+    private var parityTestSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            Text("ScreenCaptureKit vs AVFoundation Parity")
+                .font(.subheadline)
+            HStack(spacing: 8) {
+                Text("Duration (s):")
+                TextField("Seconds", text: $parityDurationText)
+                    .frame(width: 60)
+                    .textFieldStyle(.roundedBorder)
+                Spacer()
+                Button {
+                    runParityTest()
+                } label: {
+                    if isRunningParityTest {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                    } else {
+                        Text("Run Parity Test")
+                    }
+                }
+                .disabled(isRunningParityTest || isRecording || isBusy)
+                .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("AVScreenRecorderDemo.Parity.Run")
+            }
+            if let parityErrorMessage {
+                Text(parityErrorMessage)
+                    .foregroundStyle(Color.red)
+                    .font(.caption)
+            }
+            if let result = parityResult {
+                ParityResultView(result: result)
+                    .accessibilityIdentifier("AVScreenRecorderDemo.Parity.Result")
+            }
+        }
+    }
+
     // MARK: - Actions
 
     private func startRecording() {
@@ -266,6 +310,68 @@ struct AVScreenRecorderDemoView: View {
                 isBusy = false
                 self.recorder = nil
                 errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func runParityTest() {
+        guard !isRunningParityTest, !isRecording, !isBusy else { return }
+        parityErrorMessage = nil
+        parityResult = nil
+        let durationSeconds: TimeInterval = {
+            if let value = Double(parityDurationText), value > 0 {
+                // 允许最长 10 分钟的长时间录制，最短 0.5 秒。
+                return max(0.5, min(value, 600))
+            }
+            return 600
+        }()
+        parityDurationText = String(format: "%.1f", durationSeconds)
+
+        let displayID = resolveDisplayIDForCurrentSelection()
+        let cropRect = resolveCropRectForCurrentSelection(displayID: displayID)
+        let fps = 30
+        let baseDirectory = outputDirectory
+
+        isRunningParityTest = true
+
+        Task {
+            do {
+                // Ensure directory exists
+                if !FileManager.default.fileExists(atPath: baseDirectory.path) {
+                    try FileManager.default.createDirectory(at: baseDirectory, withIntermediateDirectories: true)
+                }
+
+                let timestamp = Int(Date().timeIntervalSince1970)
+                async let sckURL = runScreenCaptureKitParity(
+                    displayID: displayID,
+                    cropRect: cropRect,
+                    fps: fps,
+                    duration: durationSeconds,
+                    baseFilename: "parity-sck-\(timestamp)",
+                    outputDirectory: baseDirectory
+                )
+                async let avfURL = runAVFoundationParity(
+                    displayID: displayID,
+                    cropRect: cropRect,
+                    fps: fps,
+                    duration: durationSeconds,
+                    baseFilename: "parity-avf-\(timestamp)",
+                    outputDirectory: baseDirectory
+                )
+
+                let (sckFile, avfFile) = try await (sckURL, avfURL)
+                let sckAnalysis = await analyzeRecording(at: sckFile)
+                let avfAnalysis = await analyzeRecording(at: avfFile)
+
+                await MainActor.run {
+                    self.parityResult = ParityResult(screenCaptureKit: sckAnalysis, avFoundation: avfAnalysis)
+                    self.isRunningParityTest = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.parityErrorMessage = error.localizedDescription
+                    self.isRunningParityTest = false
+                }
             }
         }
     }
@@ -449,6 +555,327 @@ struct AVScreenRecorderDemoView: View {
                 .foregroundStyle(.secondary)
         }
         .accessibilityIdentifier("AVScreenRecorderDemo.Status")
+    }
+}
+
+// MARK: - Parity helpers
+
+private struct ParityResult: Identifiable {
+    let id = UUID()
+    let screenCaptureKit: RecordingAnalysis
+    let avFoundation: RecordingAnalysis
+
+    var durationDifference: Double? {
+        guard let a = screenCaptureKit.duration, let b = avFoundation.duration else { return nil }
+        return abs(a - b)
+    }
+
+    var fileSizeRatio: Double? {
+        ratio(screenCaptureKit.fileSizeBytes, avFoundation.fileSizeBytes)
+    }
+
+    var videoBitrateRatio: Double? {
+        ratio(screenCaptureKit.videoBitrate, avFoundation.videoBitrate)
+    }
+
+    var overallBitrateRatio: Double? {
+        ratio(screenCaptureKit.overallBitrate, avFoundation.overallBitrate)
+    }
+
+    /// Difference between nominal frame rates, if both are available.
+    var fpsDifference: Double? {
+        guard
+            let a = screenCaptureKit.nominalFrameRate,
+            let b = avFoundation.nominalFrameRate
+        else { return nil }
+        return abs(Double(a) - Double(b))
+    }
+
+    private func ratio(_ a: Int?, _ b: Int?) -> Double? {
+        guard let a, let b, a > 0, b > 0 else { return nil }
+        let da = Double(a), db = Double(b)
+        return max(da, db) / min(da, db)
+    }
+
+    private func ratio(_ a: Double?, _ b: Double?) -> Double? {
+        guard let a, let b, a > 0, b > 0 else { return nil }
+        return max(a, b) / min(a, b)
+    }
+}
+
+private struct RecordingAnalysis: Identifiable {
+    let id = UUID()
+    let url: URL
+
+    let hasVideo: Bool
+    let hasAudio: Bool
+    let videoCodec: String?
+    let audioCodec: String?
+
+    let videoSize: CGSize?
+    let duration: Double?
+    let nominalFrameRate: Float?
+
+    let fileSizeBytes: Int?
+    let overallBitrate: Double?   // bits per second
+    let videoBitrate: Double?     // bits per second
+    let audioBitrate: Double?     // bits per second
+
+    var fileSizeMegabytes: Double? {
+        guard let fileSizeBytes else { return nil }
+        return Double(fileSizeBytes) / 1_048_576.0
+    }
+
+    var videoBitrateMbps: Double? {
+        videoBitrate.map { $0 / 1_000_000.0 }
+    }
+
+    var overallBitrateMbps: Double? {
+        overallBitrate.map { $0 / 1_000_000.0 }
+    }
+}
+
+private func runScreenCaptureKitParity(
+    displayID: CGDirectDisplayID,
+    cropRect: CGRect?,
+    fps: Int,
+    duration: TimeInterval,
+    baseFilename: String,
+    outputDirectory: URL
+) async throws -> URL {
+    let scheme = CRRecorder.SchemeItem.display(
+        displayID: displayID,
+        area: cropRect,
+        hdr: false,
+        captureSystemAudio: false,
+        filename: baseFilename,
+        backend: .screenCaptureKit,
+        excludedWindowTitles: []
+    )
+    let recorder = CRRecorder([scheme], outputDirectory: outputDirectory)
+
+    try await recorder.prepare([scheme])
+    try await recorder.startRecording()
+
+    try await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+
+    let result = try await recorder.stopRecordingWithResult()
+    guard let asset = result.bundleInfo.files.first else {
+        throw NSError(domain: "AVScreenRecorderDemo", code: -1, userInfo: [NSLocalizedDescriptionKey: "No ScreenCaptureKit output file."])
+    }
+    return result.bundleURL.appendingPathComponent(asset.filename)
+}
+
+private func runAVFoundationParity(
+    displayID: CGDirectDisplayID,
+    cropRect: CGRect?,
+    fps: Int,
+    duration: TimeInterval,
+    baseFilename: String,
+    outputDirectory: URL
+) async throws -> URL {
+    let config = AVScreenRecorder.Configuration(
+        displayID: displayID,
+        cropRect: cropRect,
+        showsCursor: false,
+        capturesMouseClicks: false,
+        fps: fps,
+        includeAudio: false
+    )
+    let recorder = AVScreenRecorder(configuration: config)
+    var url = outputDirectory.appendingPathComponent(baseFilename)
+    if url.pathExtension.isEmpty {
+        url.appendPathExtension("mov")
+    }
+    try await recorder.startRecording(to: url)
+    try await Task.sleep(nanoseconds: UInt64(duration * 1_000_000_000))
+    let result = try await recorder.stopRecording()
+    return result.fileURL
+}
+
+private func analyzeRecording(at url: URL) async -> RecordingAnalysis {
+    await withCheckedContinuation { continuation in
+        DispatchQueue.global(qos: .userInitiated).async {
+            let asset = AVAsset(url: url)
+            let videoTrack = asset.tracks(withMediaType: .video).first
+            let audioTrack = asset.tracks(withMediaType: .audio).first
+
+            let hasVideo = (videoTrack != nil)
+            let hasAudio = (audioTrack != nil)
+
+            let durationSeconds: Double? = {
+                let d = asset.duration
+                guard d.isNumeric && d.value != 0 else { return nil }
+                return CMTimeGetSeconds(d)
+            }()
+
+            let videoSize: CGSize? = {
+                guard let track = videoTrack else { return nil }
+                let size = track.naturalSize.applying(track.preferredTransform)
+                return CGSize(width: abs(size.width), height: abs(size.height))
+            }()
+
+            let nominalFPS = videoTrack?.nominalFrameRate
+            let videoBitrate = videoTrack.map { Double($0.estimatedDataRate) }
+            let audioBitrate = audioTrack.map { Double($0.estimatedDataRate) }
+
+            let fileSizeBytes: Int? = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize
+            let overallBitrate: Double? = {
+                guard let bytes = fileSizeBytes, let d = durationSeconds, d > 0 else { return nil }
+                return Double(bytes * 8) / d
+            }()
+
+            let videoCodec = videoTrack.flatMap { codecString(for: $0) }
+            let audioCodec = audioTrack.flatMap { codecString(for: $0) }
+
+            let analysis = RecordingAnalysis(
+                url: url,
+                hasVideo: hasVideo,
+                hasAudio: hasAudio,
+                videoCodec: videoCodec,
+                audioCodec: audioCodec,
+                videoSize: videoSize,
+                duration: durationSeconds,
+                nominalFrameRate: nominalFPS,
+                fileSizeBytes: fileSizeBytes,
+                overallBitrate: overallBitrate,
+                videoBitrate: videoBitrate,
+                audioBitrate: audioBitrate
+            )
+
+            continuation.resume(returning: analysis)
+        }
+    }
+}
+
+private func codecString(for track: AVAssetTrack) -> String? {
+    guard let anyDesc = track.formatDescriptions.first else { return nil }
+    let desc = anyDesc as! CMFormatDescription
+    let fourcc = CMFormatDescriptionGetMediaSubType(desc)
+    return fourCCString(fourcc)
+}
+
+private func fourCCString(_ code: UInt32) -> String {
+    let big = CFSwapInt32HostToBig(code)
+    var chars: [CChar] = [
+        CChar((big >> 24) & 0xff),
+        CChar((big >> 16) & 0xff),
+        CChar((big >> 8) & 0xff),
+        CChar(big & 0xff),
+        0
+    ]
+    return String(cString: &chars)
+}
+
+private struct ParityResultView: View {
+    let result: ParityResult
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("ScreenCaptureKit")
+                    .font(.caption)
+                    .bold()
+                Spacer()
+                Text(result.screenCaptureKit.url.lastPathComponent)
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            metricsView(for: result.screenCaptureKit)
+
+            HStack {
+                Text("AVFoundation")
+                    .font(.caption)
+                    .bold()
+                Spacer()
+                Text(result.avFoundation.url.lastPathComponent)
+                    .font(.caption2)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            metricsView(for: result.avFoundation)
+
+            if
+                let sckFPS = result.screenCaptureKit.nominalFrameRate,
+                let avfFPS = result.avFoundation.nominalFrameRate
+            {
+                Text(
+                    String(
+                        format: "FPS (nominal): SCK=%.2f  AVF=%.2f  Δ=%.2f",
+                        sckFPS,
+                        avfFPS,
+                        fabs(Double(sckFPS - avfFPS))
+                    )
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            }
+
+            if let diff = result.durationDifference {
+                Text(String(format: "Δ duration: %.3fs", diff))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let r = result.fileSizeRatio {
+                Text(String(format: "File size ratio (max/min): %.2fx", r))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let r = result.videoBitrateRatio {
+                Text(String(format: "Video bitrate ratio (max/min): %.2fx", r))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            if let r = result.overallBitrateRatio {
+                Text(String(format: "Overall bitrate ratio (max/min): %.2fx", r))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption)
+    }
+
+    private func metricsView(for analysis: RecordingAnalysis) -> some View {
+        let audioLine: String = {
+            if analysis.hasAudio, let codec = analysis.audioCodec {
+                if let br = analysis.audioBitrate {
+                    return String(format: "Audio: %@, %.2f kbps", codec, br / 1000.0)
+                } else {
+                    return "Audio: \(codec)"
+                }
+            } else if analysis.hasAudio {
+                return "Audio track: present"
+            } else {
+                return "Audio track: none"
+            }
+        }()
+
+        return VStack(alignment: .leading, spacing: 2) {
+            if let size = analysis.videoSize {
+                Text("Video size: \(Int(size.width))x\(Int(size.height))")
+            }
+            if let d = analysis.duration {
+                Text(String(format: "Duration: %.3fs", d))
+            }
+            if let fps = analysis.nominalFrameRate, fps > 0 {
+                Text(String(format: "FPS (nominal): %.2f", fps))
+            }
+            if let codec = analysis.videoCodec {
+                Text("Video codec: \(codec)")
+            }
+            if let mb = analysis.fileSizeMegabytes {
+                Text(String(format: "File size: %.2f MB", mb))
+            }
+            if let v = analysis.videoBitrateMbps {
+                Text(String(format: "Video bitrate: %.2f Mbps", v))
+            }
+            if let o = analysis.overallBitrateMbps {
+                Text(String(format: "Overall bitrate: %.2f Mbps", o))
+            }
+            Text(audioLine)
+        }
+        .foregroundStyle(.secondary)
     }
 }
 

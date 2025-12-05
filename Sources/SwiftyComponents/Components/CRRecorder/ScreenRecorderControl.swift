@@ -92,6 +92,9 @@ public struct ScreenRecorderControl: View {
 
     // Keep a reference while recording
     @State private var recorder: CRRecorder? = nil
+    // Backend parity (ScreenCaptureKit vs AVFoundation) diagnostics
+    @State private var backendParitySummary: ScreenBackendParitySummary? = nil
+    @State private var backendParityErrorMessage: String? = nil
     // Player sheet state
     @State private var showPlayer: Bool = false
     @State private var avPlayer: AVPlayer? = nil
@@ -265,6 +268,20 @@ public struct ScreenRecorderControl: View {
                     }
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 320)
+                    Button("对比测试") {
+                        Task { await runBackendParityManual() }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isRecording || isBusy)
+                }
+                if let parityError = backendParityErrorMessage {
+                    Text(parityError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+                if let summary = backendParitySummary {
+                    ScreenBackendParityView(summary: summary)
+                        .padding(.top, 4)
                 }
             }
 
@@ -449,6 +466,104 @@ public struct ScreenRecorderControl: View {
     }
 
     // MARK: - Actions
+
+    /// 手动运行一次“后端一致性”对比：顺序录制 SCK 与 AVFoundation，两条短视频并进行参数对比。
+    @MainActor
+    private func runBackendParityManual() async {
+        guard !isRecording, !isBusy else { return }
+        isBusy = true
+        backendParityErrorMessage = nil
+        defer { isBusy = false }
+
+        // 使用当前选择的显示器与区域，但强制关闭系统音频/麦克风/摄像头，仅对比屏幕视频。
+        let dispID: CGDirectDisplayID = selectedDisplayID.map { CGDirectDisplayID($0) } ?? configuration.displayID
+        let area: CGRect? = {
+            switch mode {
+            case .display:
+                return (regionMode == .crop) ? configuration.cropRect : nil
+            case .window:
+                // 窗口模式下暂不支持 parity，退回全屏。
+                return nil
+            }
+        }()
+        let seconds: Double = 3.0
+
+        let baseName = Self.timestampedFilenamePrefix("parity")
+        let sessionDir = outputDirectory.appendingPathComponent(baseName)
+        try? FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+        do {
+            let sckURL = try await recordOneBackendForParity(
+                backend: .screenCaptureKit,
+                baseName: baseName,
+                suffix: "sck",
+                displayID: dispID,
+                area: area,
+                seconds: seconds,
+                sessionDir: sessionDir
+            )
+            let avfURL = try await recordOneBackendForParity(
+                backend: .avFoundation,
+                baseName: baseName,
+                suffix: "avf",
+                displayID: dispID,
+                area: area,
+                seconds: seconds,
+                sessionDir: sessionDir
+            )
+
+            let sckAnalysis = await analyzeScreenRecording(at: sckURL)
+            let avfAnalysis = await analyzeScreenRecording(at: avfURL)
+            backendParitySummary = computeScreenBackendParity(
+                screenCaptureKit: sckAnalysis,
+                avFoundation: avfAnalysis
+            )
+        } catch {
+            backendParityErrorMessage = error.localizedDescription
+        }
+    }
+    /// 以给定后端录制一条短视频（仅屏幕），供 parity 测试使用。
+    @MainActor
+    private func recordOneBackendForParity(
+        backend: CRRecorder.ScreenBackend,
+        baseName: String,
+        suffix: String,
+        displayID: CGDirectDisplayID,
+        area: CGRect?,
+        seconds: Double,
+        sessionDir: URL
+    ) async throws -> URL {
+        let fileBase = baseName + "-" + suffix
+        let scheme: CRRecorder.SchemeItem = .display(
+            displayID: displayID,
+            area: area,
+            hdr: hdr,
+            captureSystemAudio: false,
+            filename: fileBase,
+            backend: backend,
+            excludedWindowTitles: []
+        )
+        let rec = CRRecorder([scheme], outputDirectory: sessionDir)
+        var opts = ScreenRecorderOptions(
+            fps: fps,
+            queueDepth: Int(queueDepthText),
+            targetBitRate: Int(targetBitrateText),
+            includeAudio: false,
+            showsCursor: showsCursor,
+            hdr: hdr,
+            useHEVC: useHEVC
+        )
+        rec.screenOptions = opts
+        try await rec.prepare([scheme])
+        try await rec.startRecording()
+        try? await Task.sleep(nanoseconds: UInt64(max(0.1, seconds) * 1_000_000_000))
+        let result = try await rec.stopRecordingWithResult()
+        guard let file = result.bundleInfo.files.first(where: { $0.tyle == .screen }) ?? result.bundleInfo.files.first else {
+            throw RecordingError.recordingFailed("No screen file generated for backend \(backend.rawValue)")
+        }
+        return sessionDir.appendingPathComponent(file.filename)
+    }
+
     @MainActor private func start() async {
         isBusy = true
         defer { isBusy = false }
