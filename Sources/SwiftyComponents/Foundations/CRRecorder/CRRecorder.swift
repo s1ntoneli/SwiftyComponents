@@ -420,6 +420,30 @@ public class CRRecorder: @unchecked Sendable {
         return res
     }
 
+    /// Dispose prepared capture sessions without producing outputs/manifest.
+    /// This is intended for user-cancel flows before `startRecording()` happens (e.g. countdown cancelled),
+    /// so hardware resources like microphone/camera are released immediately.
+    public func disposePreparedSessions() async {
+        for (_, mic) in microphoneCaptures {
+            _ = try? await mic.stop()
+        }
+        for (_, cam) in cameraCaptures {
+            _ = try? await cam.stop()
+        }
+        for (_, dev) in appleDeviceCaptures {
+            _ = try? await dev.stop()
+        }
+
+        // Screen backends are typically not started until `startRecording()`, but release references anyway.
+        // Avoid calling `stop()` here to prevent writing placeholder assets when no recording actually started.
+        screenCaptureSessions = nil
+
+        // Reset cached stop state and clear all references.
+        stopAllCachedResult = nil
+        isStoppingAll = false
+        clear()
+    }
+
     // Real stop implementation. Do not call directly; use stopRecordingWithResult().
     private func _stopAllWithResultImpl() async throws -> Result {
         
