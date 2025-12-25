@@ -68,7 +68,8 @@ final class ScreenVideoFPSMeter: @unchecked Sendable {
         totalCaptured = 0
         totalAppended = 0
         totalDroppedNotReady = 0
-        lastTickUptime = nil
+        // Initialize tick markers immediately so the first timer tick uses the real elapsed time.
+        lastTickUptime = ProcessInfo.processInfo.systemUptime
         lastTickCounts = (0, 0, 0)
         lastMetrics = CRRecorder.ScreenVideoFPSMetrics(
             time: Date(),
