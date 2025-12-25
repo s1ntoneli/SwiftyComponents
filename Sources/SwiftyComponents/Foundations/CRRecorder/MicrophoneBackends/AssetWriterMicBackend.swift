@@ -5,11 +5,18 @@ final class AssetWriterMicBackend: MicrophoneBackend {
     var onFirstPTS: ((CMTime) -> Void)?
     var processingOptions: MicrophoneProcessingOptions = .init()
 
+    private enum StopState {
+        case idle
+        case stopping
+        case stopped
+    }
+
     private weak var session: AVCaptureSession?
     private weak var delegate: CaptureRecordingDelegate?
     private var audioDataOutput: AVCaptureAudioDataOutput?
     private var observers: [Any] = []
     private var observedDeviceID: String?
+    private var callbackQueue: DispatchQueue?
 
     private var writer: AVAssetWriter?
     private var input: AVAssetWriterInput?
@@ -21,11 +28,13 @@ final class AssetWriterMicBackend: MicrophoneBackend {
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var acceptingSamples = true
     private var didSignalError = false
+    private var stopState: StopState = .idle
 
     func configure(session: AVCaptureSession, device: AVCaptureDevice, delegate: CaptureRecordingDelegate, queue: DispatchQueue) throws {
         self.session = session
         self.delegate = delegate
         self.observedDeviceID = device.uniqueID
+        self.callbackQueue = queue
 
         // Cache the device's native format (sample rate / channels) for better compatibility with external microphones.
         let activeFormat = device.activeFormat
@@ -91,23 +100,91 @@ final class AssetWriterMicBackend: MicrophoneBackend {
     }
 
     func stop() async throws -> URL? {
-        guard let session else { return fileURL }
-        acceptingSamples = false
-        audioDataOutput?.setSampleBufferDelegate(nil, queue: nil)
-        input?.markAsFinished()
-        if let writer { await writer.finishWriting() }
-        AVCaptureSessionHelper.stopRecordingStep2Close(avSession: session)
-        removeObservers()
-        return fileURL
+        let queue = callbackQueue ?? DispatchQueue(label: "com.recorderkit.microphone.backend.stop", qos: .userInitiated)
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<URL?, Error>) in
+            queue.async { [weak self] in
+                guard let self else { cont.resume(returning: nil); return }
+                guard let session = self.session else { cont.resume(returning: self.fileURL); return }
+
+                switch self.stopState {
+                case .idle:
+                    self.stopState = .stopping
+                case .stopping, .stopped:
+                    cont.resume(returning: self.fileURL)
+                    return
+                }
+
+                self.acceptingSamples = false
+                if let startContinuation = self.startContinuation {
+                    self.startContinuation = nil
+                    startContinuation.resume(throwing: RecordingError.userAbort)
+                }
+
+                self.audioDataOutput?.setSampleBufferDelegate(nil, queue: nil)
+
+                func cleanupAndResume(_ result: Result<Void, Error>) {
+                    AVCaptureSessionHelper.stopRecordingStep2Close(avSession: session)
+                    self.removeObservers()
+                    self.stopState = .stopped
+                    switch result {
+                    case .success:
+                        cont.resume(returning: self.fileURL)
+                    case .failure(let error):
+                        cont.resume(throwing: error)
+                    }
+                }
+
+                guard let writer = self.writer else {
+                    cleanupAndResume(.success(()))
+                    return
+                }
+
+                switch writer.status {
+                case .writing:
+                    guard self.writerSessionStarted else {
+                        writer.cancelWriting()
+                        cleanupAndResume(.success(()))
+                        return
+                    }
+                    self.input?.markAsFinished()
+                    writer.finishWriting { [weak self] in
+                        guard let self else { return }
+                        let result: Result<Void, Error>
+                        if let err = writer.error {
+                            result = .failure(err)
+                        } else {
+                            result = .success(())
+                        }
+                        queue.async { cleanupAndResume(result) }
+                    }
+                case .failed:
+                    cleanupAndResume(.failure(writer.error ?? RecordingError.recordingFailed("AVAssetWriter failed")))
+                case .cancelled, .completed, .unknown:
+                    cleanupAndResume(.success(()))
+                @unknown default:
+                    cleanupAndResume(.success(()))
+                }
+            }
+        }
+    }
+
+    private func signalErrorOnce(_ error: Error) {
+        if !didSignalError {
+            didSignalError = true
+            delegate?.onError(error)
+        }
+        if let startContinuation {
+            self.startContinuation = nil
+            startContinuation.resume(throwing: error)
+        }
     }
 
     // Simple gain/AGC processing without AVAudioEngine.
     private var agcSmoothedGain: Float = 1.0
     private func handleSample(_ sampleBuffer: CMSampleBuffer) {
         guard acceptingSamples, let writer, let input else { return }
-        if writer.status == .failed, !didSignalError {
-            didSignalError = true
-            delegate?.onError(writer.error ?? RecordingError.recordingFailed("Audio writer failed"))
+        if writer.status == .failed {
+            signalErrorOnce(writer.error ?? RecordingError.recordingFailed("Audio writer failed"))
             return
         }
         let pts = sampleBuffer.presentationTimeStamp
@@ -119,9 +196,8 @@ final class AssetWriterMicBackend: MicrophoneBackend {
             startContinuation = nil
         }
         guard input.isReadyForMoreMediaData, writer.status == .writing else {
-            if writer.status == .failed, !didSignalError {
-                didSignalError = true
-                delegate?.onError(writer.error ?? RecordingError.recordingFailed("Audio writer failed"))
+            if writer.status == .failed {
+                signalErrorOnce(writer.error ?? RecordingError.recordingFailed("Audio writer failed"))
             }
             return
         }
@@ -129,9 +205,8 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         // For maximum compatibility with external microphones, avoid manual PCM processing
         // and delegate resampling/mixing to AVAssetWriter.
         let ok = input.append(sampleBuffer)
-        if !ok, writer.status == .failed, !didSignalError {
-            didSignalError = true
-            delegate?.onError(writer.error ?? RecordingError.recordingFailed("Audio append failed"))
+        if !ok, writer.status == .failed {
+            signalErrorOnce(writer.error ?? RecordingError.recordingFailed("Audio append failed"))
         }
     }
 
@@ -277,20 +352,20 @@ final class AssetWriterMicBackend: MicrophoneBackend {
     private func installObservers(for session: AVCaptureSession) {
         let nc = NotificationCenter.default
         let o1 = nc.addObserver(forName: .AVCaptureSessionWasInterrupted, object: session, queue: nil) { [weak self] note in
-            self?.delegate?.onError(RecordingError.recordingFailed("Microphone session interrupted"))
+            self?.signalErrorOnce(RecordingError.recordingFailed("Microphone session interrupted"))
         }
         let o2 = nc.addObserver(forName: .AVCaptureSessionRuntimeError, object: session, queue: nil) { [weak self] note in
             if let err = note.userInfo?[AVCaptureSessionErrorKey] as? Error {
-                self?.delegate?.onError(err)
+                self?.signalErrorOnce(err)
             } else {
-                self?.delegate?.onError(RecordingError.recordingFailed("Microphone runtime error"))
+                self?.signalErrorOnce(RecordingError.recordingFailed("Microphone runtime error"))
             }
         }
         let o3 = nc.addObserver(forName: .AVCaptureDeviceWasDisconnected, object: nil, queue: nil) { [weak self] n in
             guard let self else { return }
             guard let dev = n.object as? AVCaptureDevice else { return }
             if dev.uniqueID == self.observedDeviceID {
-                self.delegate?.onError(RecordingError.recordingFailed("Microphone disconnected"))
+                self.signalErrorOnce(RecordingError.recordingFailed("Microphone disconnected"))
             }
         }
         observers = [o1, o2, o3]
