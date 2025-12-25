@@ -29,6 +29,14 @@ public class CRRecorder: @unchecked Sendable {
     
     var resultSubject: PassthroughSubject<Result, Error> = .init()
     public var audioLevelSubject: PassthroughSubject<Float, Never> = .init()
+
+    private let screenVideoFPSSubject: PassthroughSubject<ScreenVideoFPSMetrics, Never>
+    private let screenVideoFPSMeter: ScreenVideoFPSMeter
+
+    /// Screen video FPS metrics (capture/append/drop) published at a low frequency (e.g. 1s).
+    public var screenVideoFPSPublisher: AnyPublisher<ScreenVideoFPSMetrics, Never> {
+        screenVideoFPSSubject.eraseToAnyPublisher()
+    }
     
     // Idempotent stopping guards（标记位方案）
     private var isStoppingAll: Bool = false
@@ -41,6 +49,11 @@ public class CRRecorder: @unchecked Sendable {
     }
 
     public init(_ schemes: [SchemeItem], outputDirectory: URL) {
+        let fpsSubject = PassthroughSubject<ScreenVideoFPSMetrics, Never>()
+        self.screenVideoFPSSubject = fpsSubject
+        self.screenVideoFPSMeter = ScreenVideoFPSMeter(intervalSeconds: 1.0) { metrics in
+            fpsSubject.send(metrics)
+        }
         self.schemes = schemes
         self.outputDirectory = outputDirectory
         print("[CRRecorder] 初始化录制器，输出目录: \(outputDirectory.path), 录制方案数量: \(schemes.count)")
@@ -567,6 +580,43 @@ public class CRRecorder: @unchecked Sendable {
         public var bundleURL: URL
         public var bundleInfo: BundleInfo
     }
+
+    public struct ScreenVideoFPSMetrics: Sendable {
+        public let time: Date
+        public let backend: ScreenBackend
+        public let isActive: Bool
+        public let intervalSeconds: TimeInterval
+        public let captureFPS: Double
+        public let appendFPS: Double
+        public let dropNotReadyFPS: Double
+        public let totalCaptured: UInt64
+        public let totalAppended: UInt64
+        public let totalDroppedNotReady: UInt64
+
+        public init(
+            time: Date,
+            backend: ScreenBackend,
+            isActive: Bool,
+            intervalSeconds: TimeInterval,
+            captureFPS: Double,
+            appendFPS: Double,
+            dropNotReadyFPS: Double,
+            totalCaptured: UInt64,
+            totalAppended: UInt64,
+            totalDroppedNotReady: UInt64
+        ) {
+            self.time = time
+            self.backend = backend
+            self.isActive = isActive
+            self.intervalSeconds = intervalSeconds
+            self.captureFPS = captureFPS
+            self.appendFPS = appendFPS
+            self.dropNotReadyFPS = dropNotReadyFPS
+            self.totalCaptured = totalCaptured
+            self.totalAppended = totalAppended
+            self.totalDroppedNotReady = totalDroppedNotReady
+        }
+    }
     
     public struct BundleInfo: Codable, Sendable {
         public var duration: TimeInterval
@@ -642,6 +692,7 @@ extension CRRecorder {
         switch backend {
         case .screenCaptureKit:
             let recorder = ScreenCaptureRecorder(filePath: filePath, options: options)
+            recorder.videoFPSSink = screenVideoFPSMeter
             recorder.errorHandler = { [weak self] error in
                 guard let self else { return }
                 NSLog("🔥 [CR_RECORDER_ERROR] CRRecorder 接收到屏幕/窗口录制错误: %@", error.localizedDescription)
@@ -650,6 +701,7 @@ extension CRRecorder {
             return recorder
         case .avFoundation:
             let backendRecorder = AVFoundationScreenRecorderBackend(outputDirectory: outputDirectory, baseFilename: filename, options: options)
+            backendRecorder.videoFPSSink = screenVideoFPSMeter
             backendRecorder.errorHandler = { [weak self] error in
                 guard let self else { return }
                 let ns = error as NSError

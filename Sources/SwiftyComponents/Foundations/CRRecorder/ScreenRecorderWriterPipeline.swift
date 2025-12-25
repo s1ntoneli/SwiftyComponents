@@ -9,17 +9,25 @@ final class WriterPipeline {
     let videoInput: AVAssetWriterInput
     let audioInput: AVAssetWriterInput?
     private(set) var didStartSession: Bool = false
+    private weak var videoFPSSink: ScreenVideoFPSEventSink?
     // Keep last video for final keepalive
     private var lastVideoSample: CMSampleBuffer?
     private var lastVideoPTS: CMTime?
     // 防重入/并发 finish 保护
     private var isFinishing: Bool = false
 
-    init(writer: AVAssetWriter, videoInput: AVAssetWriterInput, audioInput: AVAssetWriterInput?, didStartSession: Bool) {
+    init(
+        writer: AVAssetWriter,
+        videoInput: AVAssetWriterInput,
+        audioInput: AVAssetWriterInput?,
+        didStartSession: Bool,
+        videoFPSSink: ScreenVideoFPSEventSink?
+    ) {
         self.writer = writer
         self.videoInput = videoInput
         self.audioInput = audioInput
         self.didStartSession = didStartSession
+        self.videoFPSSink = videoFPSSink
     }
 
     static func create(
@@ -27,7 +35,8 @@ final class WriterPipeline {
         configuration: SCStreamConfiguration,
         hdr: Bool,
         includeAudio: Bool,
-        options: ScreenRecorderOptions
+        options: ScreenRecorderOptions,
+        videoFPSSink: ScreenVideoFPSEventSink? = nil
     ) throws -> WriterPipeline {
         let writer = try AVAssetWriter(url: url, fileType: .mov)
         writer.movieFragmentInterval = CMTime(seconds: RecorderDiagnostics.shared.fragmentIntervalSeconds, preferredTimescale: 600)
@@ -48,7 +57,7 @@ final class WriterPipeline {
         }
 
         guard writer.startWriting() else { throw writer.error ?? RecordingError.recordingFailed("startWriting failed") }
-        return WriterPipeline(writer: writer, videoInput: vInput, audioInput: aInput, didStartSession: false)
+        return WriterPipeline(writer: writer, videoInput: vInput, audioInput: aInput, didStartSession: false, videoFPSSink: videoFPSSink)
     }
 
     func startSession(at pts: CMTime) {
@@ -64,13 +73,17 @@ final class WriterPipeline {
         let ready = videoInput.isReadyForMoreMediaData
         RecorderDiagnostics.shared.beforeAppendVideo(ready: ready, status: writer.status)
         guard writer.status == .writing, ready else {
-            if !ready { RecorderDiagnostics.shared.onDroppedVideoNotReady() }
+            if !ready {
+                RecorderDiagnostics.shared.onDroppedVideoNotReady()
+                videoFPSSink?.onDroppedVideoFrameNotReady()
+            }
             return
         }
         if videoInput.append(sample) {
             lastVideoSample = sample
             lastVideoPTS = sample.presentationTimeStamp
             RecorderDiagnostics.shared.onAppendedVideo()
+            videoFPSSink?.onAppendedVideoFrame()
         }
     }
 

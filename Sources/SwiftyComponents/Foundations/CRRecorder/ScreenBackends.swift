@@ -10,6 +10,8 @@ import CoreGraphics
 protocol ScreenRecorderBackend: AnyObject, Sendable {
     /// 错误回调，由 CRRecorder 注入，用于统一中断处理。
     var errorHandler: ((Error) -> Void)? { get set }
+    /// Optional FPS sink for screen video metrics (release-safe).
+    var videoFPSSink: ScreenVideoFPSEventSink? { get set }
 
     /// 开始整屏录制。
     func startScreenCapture(
@@ -51,6 +53,7 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
     // MARK: - Public API
 
     var errorHandler: ((Error) -> Void)?
+    var videoFPSSink: ScreenVideoFPSEventSink?
 
     // MARK: - Private state
 
@@ -76,6 +79,7 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
         includeAudio: Bool,
         excludedWindowTitles: [String]
     ) async throws -> [CRRecorder.BundleInfo.FileAsset] {
+        videoFPSSink?.onSessionStart(backend: .avFoundation)
         let config = AVScreenRecorder.Configuration(
             displayID: displayID,
             cropRect: cropRect,
@@ -83,7 +87,12 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
             capturesMouseClicks: false,
             fps: options.fps
         )
-        try await startWithConfiguration(config)
+        do {
+            try await startWithConfiguration(config)
+        } catch {
+            videoFPSSink?.onSessionStop()
+            throw error
+        }
         // 与 ScreenCaptureRecorder 一致：启动阶段仅返回文件名/起始时间占位信息，
         // 精确的 PTS/时长在 stop() 阶段统一汇总。
         let url = makeFileURL()
@@ -106,6 +115,7 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
         frameRate: Int,
         h265: Bool
     ) async throws -> [CRRecorder.BundleInfo.FileAsset] {
+        videoFPSSink?.onSessionStart(backend: .avFoundation)
         guard let bounds = windowBounds(for: windowID) else {
             throw AVScreenRecorder.RecorderError.configurationFailed("Cannot resolve bounds for window \(windowID)")
         }
@@ -117,7 +127,12 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
             capturesMouseClicks: false,
             fps: frameRate
         )
-        try await startWithConfiguration(config)
+        do {
+            try await startWithConfiguration(config)
+        } catch {
+            videoFPSSink?.onSessionStop()
+            throw error
+        }
         let url = makeFileURL()
         let asset = CRRecorder.BundleInfo.FileAsset(
             filename: url.lastPathComponent,
@@ -133,6 +148,7 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
         guard let recorder else { return [] }
         do {
             let res = try await recorder.stopRecording()
+            videoFPSSink?.onSessionStop()
             let dims: CRRecorder.BundleInfo.Size? = res.videoDimensions.map {
                 .init(width: Int($0.width), height: Int($0.height))
             }
@@ -148,6 +164,7 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
             lastAsset = asset
             return [asset]
         } catch let err as AVScreenRecorder.RecorderError {
+            videoFPSSink?.onSessionStop()
             // 针对 notRecording 等情况：如文件已在磁盘上存在，可选地提供一个“无对齐时间戳”的占位结果，
             // 但不再尝试用墙钟时间推算录制起止，避免污染对齐语义。
             if case .notRecording = err {
@@ -175,6 +192,9 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
                 }
             }
             throw err
+        } catch {
+            videoFPSSink?.onSessionStop()
+            throw error
         }
     }
 
@@ -199,7 +219,9 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
         let rec = AVScreenRecorder(configuration: config)
         rec.errorHandler = { [weak self] error in
             self?.errorHandler?(error)
+            self?.videoFPSSink?.onSessionStop()
         }
+        rec.videoFPSSink = videoFPSSink
         self.recorder = rec
         try await rec.startRecording(to: makeFileURL())
     }

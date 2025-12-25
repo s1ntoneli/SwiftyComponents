@@ -6,6 +6,7 @@ import ScreenCaptureKit
 final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
     // MARK: Callbacks
     var errorHandler: ((Error) -> Void)?
+    var videoFPSSink: ScreenVideoFPSEventSink?
 
     // MARK: State
     private var filePath: String
@@ -38,8 +39,10 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         includeAudio: Bool,
         excludedWindowTitles: [String]
     ) async throws -> [CRRecorder.BundleInfo.FileAsset] {
+        videoFPSSink?.onSessionStart(backend: .screenCaptureKit)
         recordingStartTimestamp = CFAbsoluteTimeGetCurrent()
-        let content = try await SCShareableContent.current
+        do {
+            let content = try await SCShareableContent.current
         guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
             throw RecordingError.recordingFailed("Can't find display with ID \(displayID)")
         }
@@ -58,6 +61,10 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         try startStream(configuration: config, filter: filter, includeAudio: includeAudio)
         let file = URL(fileURLWithPath: filePath)
         return [CRRecorder.BundleInfo.FileAsset(filename: file.lastPathComponent, tyle: .screen, recordingStartTimestamp: firstFrameTimestamp)]
+        } catch {
+            videoFPSSink?.onSessionStop()
+            throw error
+        }
     }
 
     // MARK: - Start capture (Window)
@@ -70,8 +77,10 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         frameRate: Int = 30,
         h265: Bool = false
     ) async throws -> [CRRecorder.BundleInfo.FileAsset] {
+        videoFPSSink?.onSessionStart(backend: .screenCaptureKit)
         recordingStartTimestamp = CFAbsoluteTimeGetCurrent()
-        let content = try await SCShareableContent.current
+        do {
+            let content = try await SCShareableContent.current
         guard let window = content.windows.first(where: { $0.windowID == windowID }) else {
             throw RecordingError.recordingFailed("Can't find window with ID \(windowID)")
         }
@@ -91,6 +100,10 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         try startStream(configuration: config, filter: filter, includeAudio: includeAudio)
         let file = URL(fileURLWithPath: filePath)
         return [CRRecorder.BundleInfo.FileAsset(filename: file.lastPathComponent, tyle: .screen, recordingStartTimestamp: firstFrameTimestamp)]
+        } catch {
+            videoFPSSink?.onSessionStop()
+            throw error
+        }
     }
 
     // MARK: - Stop
@@ -123,7 +136,8 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
             configuration: configuration,
             hdr: hdr,
             includeAudio: includeAudio,
-            options: options
+            options: options,
+            videoFPSSink: videoFPSSink
         )
         RecorderDiagnostics.shared.setOutputFileURL(url)
     }
@@ -134,6 +148,7 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
         includeAudio: Bool
     ) throws {
         let out = StreamOutput()
+        out.videoFPSSink = videoFPSSink
         // 进入写入前，允许接收新样本
         allowAppend = true
         didDetachOutputs = false
@@ -196,6 +211,7 @@ final class ScreenCaptureRecorder: NSObject, @unchecked Sendable {
             try await writer.finish()
             RecorderDiagnostics.shared.onWriterStopped()
         }
+        videoFPSSink?.onSessionStop()
     }
 
     @MainActor

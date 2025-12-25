@@ -103,6 +103,8 @@ public final class AVScreenRecorder: NSObject, @unchecked Sendable {
 
     /// Optional async error callback, e.g. to propagate errors to higher-level coordinators.
     public var errorHandler: (@Sendable (Error) -> Void)?
+    /// Optional sink for screen-video FPS metrics.
+    var videoFPSSink: ScreenVideoFPSEventSink?
 
     // MARK: - Init
 
@@ -250,6 +252,7 @@ public final class AVScreenRecorder: NSObject, @unchecked Sendable {
                         self?.firstVideoPTSSeconds = time.seconds
                         print("[AVScreenRecorder] 首帧 PTS: \(time.seconds)")
                     }
+                    backend.videoFPSSink = self.videoFPSSink
                     try backend.configure(
                         session: session,
                         device: nil, // 屏幕录制路径不依赖物理设备，传入 nil 即可

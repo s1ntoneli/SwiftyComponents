@@ -92,6 +92,9 @@ public struct ScreenRecorderControl: View {
 
     // Keep a reference while recording
     @State private var recorder: CRRecorder? = nil
+    // Screen video FPS metrics (release publisher, updated ~1 Hz)
+    @State private var screenFPSMetrics: CRRecorder.ScreenVideoFPSMetrics? = nil
+    @State private var screenFPSCancellable: AnyCancellable? = nil
     // Backend parity (ScreenCaptureKit vs AVFoundation) diagnostics
     @State private var backendParitySummary: ScreenBackendParitySummary? = nil
     @State private var backendParityErrorMessage: String? = nil
@@ -336,6 +339,10 @@ public struct ScreenRecorderControl: View {
                 }
             }
 
+            if let m = screenFPSMetrics {
+                screenFPSPanel(metrics: m)
+            }
+
             if !lastSavedFiles.isEmpty {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Last Saved")
@@ -457,6 +464,10 @@ public struct ScreenRecorderControl: View {
             if selectedCameraID == nil { selectedCameraID = persistedCamID }
             loadLogs()
         }
+        .onDisappear {
+            screenFPSCancellable?.cancel()
+            screenFPSCancellable = nil
+        }
         .task { await reloadContent() }
         .onReceive(diag.$lastFrameWallTime) { t in
             if isRecording, contentFirstFrameAt == nil, let t { contentFirstFrameAt = t }
@@ -566,6 +577,9 @@ public struct ScreenRecorderControl: View {
         isBusy = true
         defer { isBusy = false }
         errorMessage = nil
+        screenFPSCancellable?.cancel()
+        screenFPSCancellable = nil
+        screenFPSMetrics = nil
 
         // Always generate a fresh timestamped base name
         fileName = Self.timestampedFilenamePrefix("capture")
@@ -643,6 +657,11 @@ public struct ScreenRecorderControl: View {
         rec.onInterupt = { err in
             DispatchQueue.main.async { self.handleInterruption(err) }
         }
+        screenFPSCancellable = rec.screenVideoFPSPublisher
+            .receive(on: RunLoop.main)
+            .sink { metrics in
+                self.screenFPSMetrics = metrics
+            }
 
         do {
             try await rec.prepare(schemes)
@@ -653,6 +672,8 @@ public struct ScreenRecorderControl: View {
             contentFirstFrameAt = nil
         } catch {
             errorMessage = error.localizedDescription
+            screenFPSCancellable?.cancel()
+            screenFPSCancellable = nil
         }
     }
 
@@ -671,6 +692,8 @@ public struct ScreenRecorderControl: View {
         } catch {
             errorMessage = error.localizedDescription
         }
+        screenFPSCancellable?.cancel()
+        screenFPSCancellable = nil
         recorder = nil
         recordStartAt = nil
         contentFirstFrameAt = nil
@@ -694,6 +717,51 @@ public struct ScreenRecorderControl: View {
             Circle().fill(isOn ? Color.green : Color.red).frame(width: 10, height: 10)
             Text(label).foregroundStyle(.secondary)
         }
+    }
+
+    private func screenFPSPanel(metrics: CRRecorder.ScreenVideoFPSMetrics) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text("Screen FPS")
+                    .font(.subheadline)
+                Text(metrics.backend == .screenCaptureKit ? "SCK" : "AVF")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("CRRecorder.ScreenFPS.Backend")
+                statusDot(isOn: metrics.isActive, label: metrics.isActive ? "Active" : "Stopped")
+                Spacer()
+                Text("Δt \(String(format: "%.1fs", metrics.intervalSeconds))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("CRRecorder.ScreenFPS.Interval")
+            }
+
+            HStack(spacing: 12) {
+                screenFPSCell(title: "Capture", fps: metrics.captureFPS, id: "CRRecorder.ScreenFPS.Capture")
+                screenFPSCell(title: "Append", fps: metrics.appendFPS, id: "CRRecorder.ScreenFPS.Append")
+                screenFPSCell(title: "Drop(notReady)", fps: metrics.dropNotReadyFPS, id: "CRRecorder.ScreenFPS.DropNotReady")
+                Spacer()
+                Text("Total: \(metrics.totalCaptured) / \(metrics.totalAppended) / \(metrics.totalDroppedNotReady)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("CRRecorder.ScreenFPS.Totals")
+            }
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.6))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .accessibilityIdentifier("CRRecorder.ScreenFPS.Panel")
+    }
+
+    private func screenFPSCell(title: String, fps: Double, id: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(String(format: "%.1f fps", fps))
+                .monospacedDigit()
+        }
+        .accessibilityIdentifier(id)
     }
 
     private func chooseFolder() {
@@ -854,6 +922,8 @@ public struct ScreenRecorderControl: View {
             self.recorder = nil
             self.recordStartAt = nil
             self.contentFirstFrameAt = nil
+            self.screenFPSCancellable?.cancel()
+            self.screenFPSCancellable = nil
         }
     }
 

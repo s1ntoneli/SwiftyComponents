@@ -5,6 +5,7 @@ final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
     var onVideo: ((CMSampleBuffer) -> Void)?
     var onAudio: ((CMSampleBuffer) -> Void)?
     var onError: ((Error) -> Void)?
+    weak var videoFPSSink: ScreenVideoFPSEventSink?
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
         guard sampleBuffer.isValid else { return }
@@ -14,6 +15,7 @@ final class StreamOutput: NSObject, SCStreamOutput, SCStreamDelegate {
                let meta = arr.first,
                let raw = meta[SCStreamFrameInfo.status] as? Int,
                let status = SCFrameStatus(rawValue: raw), status == .complete {
+                videoFPSSink?.onCaptureVideoFrame()
                 // Diagnostics: capture stats + fps measurement
                 if let buf = CMSampleBufferGetImageBuffer(sampleBuffer) {
                     let w = CVPixelBufferGetWidth(buf)

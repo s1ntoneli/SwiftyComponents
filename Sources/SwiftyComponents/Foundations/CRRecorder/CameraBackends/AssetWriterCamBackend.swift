@@ -3,6 +3,7 @@ import AVFoundation
 
 final class AssetWriterCamBackend: CameraBackend {
     var onFirstPTS: ((CMTime) -> Void)?
+    weak var videoFPSSink: ScreenVideoFPSEventSink?
 
     private enum StopState {
         case idle
@@ -182,6 +183,7 @@ final class AssetWriterCamBackend: CameraBackend {
 
     private func handleVideoSample(_ sampleBuffer: CMSampleBuffer) {
         guard acceptingSamples, CMSampleBufferIsValid(sampleBuffer) else { return }
+        videoFPSSink?.onCaptureVideoFrame()
         let pts = sampleBuffer.presentationTimeStamp
         if writer == nil {
             // 按首帧尺寸创建视频输入与写入器
@@ -274,11 +276,17 @@ final class AssetWriterCamBackend: CameraBackend {
             }
         }
 
-        if acceptingSamples, let input = videoInput, input.isReadyForMoreMediaData, writer?.status == .writing {
+        if acceptingSamples, let input = videoInput, writer?.status == .writing {
+            let ready = input.isReadyForMoreMediaData
+            if !ready {
+                videoFPSSink?.onDroppedVideoFrameNotReady()
+                return
+            }
             let ok = input.append(sampleBuffer)
             if ok {
                 lastVideoSample = sampleBuffer
                 lastVideoPTS = sampleBuffer.presentationTimeStamp
+                videoFPSSink?.onAppendedVideoFrame()
             }
             if let w = writer, (!ok || w.status == .failed) {
                 signalErrorOnce(w.error ?? RecordingError.recordingFailed("Camera video append failed"))
