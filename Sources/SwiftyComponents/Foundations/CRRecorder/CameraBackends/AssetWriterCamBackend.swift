@@ -5,6 +5,11 @@ final class AssetWriterCamBackend: CameraBackend {
     var onFirstPTS: ((CMTime) -> Void)?
     weak var videoFPSSink: ScreenVideoFPSEventSink?
 
+    private enum SampleRateSource: String {
+        case recommended
+        case fallback48k
+    }
+
     private enum StopState {
         case idle
         case stopping
@@ -65,15 +70,19 @@ final class AssetWriterCamBackend: CameraBackend {
         self.hasAudioInputInSession = hasAudioInput
 
         // 音频数据输出：仅当会话中确实存在音频输入设备时才添加
+        var hasAudioOutput: Bool = false
         if hasAudioInput {
             let ado = AVCaptureAudioDataOutput()
             if session.canAddOutput(ado) {
                 session.addOutput(ado)
                 ado.setSampleBufferDelegate(delegate, queue: queue)
                 self.audioDataOutput = ado
+                hasAudioOutput = true
             }
         }
         session.commitConfiguration()
+        // Only write an audio track if we can actually receive audio sample buffers.
+        self.hasAudioInputInSession = hasAudioInput && hasAudioOutput
 
         delegate.onVideoSample = { [weak self] sampleBuffer in
             self?.handleVideoSample(sampleBuffer)
@@ -192,7 +201,10 @@ final class AssetWriterCamBackend: CameraBackend {
                 self.writer = try AVAssetWriter(url: url, fileType: .mov)
                 // 与屏幕录制保持一致，使用可调的 fragment 间隔，便于实时分段写入
                 self.writer?.movieFragmentInterval = CMTime(seconds: RecorderDiagnostics.shared.fragmentIntervalSeconds, preferredTimescale: 600)
-            } catch { return }
+            } catch {
+                signalErrorOnce(error)
+                return
+            }
 
             var width = 1280
             var height = 720
@@ -244,35 +256,65 @@ final class AssetWriterCamBackend: CameraBackend {
             }
             let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
             vInput.expectsMediaDataInRealTime = true
+
             // 同步创建音频输入：仅在会话存在音频输入时添加，避免空音轨阻滞片段刷新
             var aInput: AVAssetWriterInput? = nil
             if hasAudioInputInSession {
-                let aSettings: [String: Any] = [
-                    AVFormatIDKey: kAudioFormatMPEG4AAC,
-                    AVSampleRateKey: 44100,
-                    AVNumberOfChannelsKey: 2,
-                    AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-                    AVEncoderBitRateKey: 128_000
-                ]
+                let (aSettings, audioLog) = buildAudioSettings()
+                logStartSettings(
+                    fileURL: url,
+                    writerFileType: .mov,
+                    videoWidth: width,
+                    videoHeight: height,
+                    fps: fps,
+                    usedHEVC: settings[AVVideoCodecKey] as? String == AVVideoCodecType.hevc.rawValue,
+                    targetVideoBitrate: (settings[AVVideoCompressionPropertiesKey] as? [String: Any]).flatMap { $0[AVVideoAverageBitRateKey] as? NSNumber }?.intValue,
+                    audioLog: audioLog
+                )
+
                 let input = AVAssetWriterInput(mediaType: .audio, outputSettings: aSettings)
                 input.expectsMediaDataInRealTime = true
                 aInput = input
+            } else {
+                logStartSettings(
+                    fileURL: url,
+                    writerFileType: .mov,
+                    videoWidth: width,
+                    videoHeight: height,
+                    fps: fps,
+                    usedHEVC: settings[AVVideoCodecKey] as? String == AVVideoCodecType.hevc.rawValue,
+                    targetVideoBitrate: (settings[AVVideoCompressionPropertiesKey] as? [String: Any]).flatMap { $0[AVVideoAverageBitRateKey] as? NSNumber }?.intValue,
+                    audioLog: nil
+                )
             }
 
-            if let writer, writer.canAdd(vInput) { writer.add(vInput); self.videoInput = vInput }
-            if let writer, let aInput, writer.canAdd(aInput) { writer.add(aInput); self.audioInput = aInput }
+            guard let writer else { signalErrorOnce(RecordingError.outputNotConfigured); return }
+            guard writer.canAdd(vInput) else {
+                signalErrorOnce(RecordingError.outputNotConfigured)
+                return
+            }
+            writer.add(vInput)
+            self.videoInput = vInput
 
-            if let writer {
-                if writer.startWriting() {
-                    writer.startSession(atSourceTime: pts)
-                    writerSessionStarted = true
-                    firstVideoPTS = pts
-                    onFirstPTS?(pts)
-                    startContinuation?.resume(returning: ())
-                    startContinuation = nil
-                } else {
-                    signalErrorOnce(writer.error ?? RecordingError.recordingFailed("Camera writer start failed"))
+            if let aInput {
+                guard writer.canAdd(aInput) else {
+                    signalErrorOnce(RecordingError.outputNotConfigured)
+                    return
                 }
+                writer.add(aInput)
+                self.audioInput = aInput
+            }
+
+            if writer.startWriting() {
+                RecorderDiagnostics.shared.onWriterStarted()
+                writer.startSession(atSourceTime: pts)
+                writerSessionStarted = true
+                firstVideoPTS = pts
+                onFirstPTS?(pts)
+                startContinuation?.resume(returning: ())
+                startContinuation = nil
+            } else {
+                signalErrorOnce(writer.error ?? RecordingError.recordingFailed("Camera writer start failed"))
             }
         }
 
@@ -291,6 +333,149 @@ final class AssetWriterCamBackend: CameraBackend {
             if let w = writer, (!ok || w.status == .failed) {
                 signalErrorOnce(w.error ?? RecordingError.recordingFailed("Camera video append failed"))
             }
+        }
+    }
+
+    private struct CameraAudioSettingsLog {
+        let recommendedAvailable: Bool
+        let sampleRateHz: Double
+        let sampleRateSource: SampleRateSource
+        let channelsRecommended: Int?
+        let channelsFinal: Int
+        let didOverrideChannels: Bool
+        let bitrateRecommended: Int?
+        let bitrateFinal: Int
+        let formatIDFinal: Int
+        let hadChannelLayoutRecommended: Bool
+        let hasChannelLayoutFinal: Bool
+    }
+
+    private func buildAudioSettings() -> ([String: Any], CameraAudioSettingsLog) {
+        let rec = audioDataOutput?.recommendedAudioSettingsForAssetWriter(writingTo: .mov) as? [String: Any]
+        var audioSettings: [String: Any] = rec ?? [:]
+
+        let recommendedAvailable = (rec != nil)
+        let recommendedSampleRate = (audioSettings[AVSampleRateKey] as? NSNumber)?.doubleValue
+        let sampleRateSource: SampleRateSource
+        let sampleRate: Double
+        if let r = recommendedSampleRate {
+            sampleRate = r
+            sampleRateSource = .recommended
+        } else {
+            sampleRate = 48_000
+            sampleRateSource = .fallback48k
+            audioSettings[AVSampleRateKey] = sampleRate
+        }
+
+        if audioSettings[AVFormatIDKey] == nil {
+            audioSettings[AVFormatIDKey] = kAudioFormatMPEG4AAC
+        }
+
+        let channelsRecommended = (audioSettings[AVNumberOfChannelsKey] as? NSNumber)?.intValue
+        let channelsFinal: Int
+        let didOverrideChannels: Bool
+        if let ch = channelsRecommended {
+            if ch > 2 {
+                channelsFinal = 2
+                didOverrideChannels = true
+                audioSettings[AVNumberOfChannelsKey] = channelsFinal
+                audioSettings.removeValue(forKey: AVChannelLayoutKey)
+            } else {
+                channelsFinal = max(1, ch)
+                didOverrideChannels = false
+            }
+        } else {
+            channelsFinal = 2
+            didOverrideChannels = true
+            audioSettings[AVNumberOfChannelsKey] = channelsFinal
+            audioSettings.removeValue(forKey: AVChannelLayoutKey)
+        }
+
+        let hadChannelLayoutRecommended = (rec?[AVChannelLayoutKey] != nil)
+        let hasChannelLayoutFinal = (audioSettings[AVChannelLayoutKey] != nil)
+
+        audioSettings.removeValue(forKey: AVEncoderAudioQualityKey)
+        let computedBitrate = preferredAudioBitrate(sampleRate: sampleRate, channels: channelsFinal)
+        if let existing = (audioSettings[AVEncoderBitRateKey] as? NSNumber)?.intValue {
+            // If we changed encoding constraints, cap bitrate conservatively.
+            if didOverrideChannels || sampleRateSource != .recommended {
+                audioSettings[AVEncoderBitRateKey] = min(existing, computedBitrate)
+            }
+        } else {
+            audioSettings[AVEncoderBitRateKey] = computedBitrate
+        }
+
+        let bitrateRecommended = (rec?[AVEncoderBitRateKey] as? NSNumber)?.intValue
+        let bitrateFinal = (audioSettings[AVEncoderBitRateKey] as? NSNumber)?.intValue ?? 0
+        let formatIDFinal = (audioSettings[AVFormatIDKey] as? NSNumber)?.intValue ?? 0
+
+        let log = CameraAudioSettingsLog(
+            recommendedAvailable: recommendedAvailable,
+            sampleRateHz: sampleRate,
+            sampleRateSource: sampleRateSource,
+            channelsRecommended: channelsRecommended,
+            channelsFinal: channelsFinal,
+            didOverrideChannels: didOverrideChannels,
+            bitrateRecommended: bitrateRecommended,
+            bitrateFinal: bitrateFinal,
+            formatIDFinal: formatIDFinal,
+            hadChannelLayoutRecommended: hadChannelLayoutRecommended,
+            hasChannelLayoutFinal: hasChannelLayoutFinal
+        )
+        return (audioSettings, log)
+    }
+
+    private func preferredAudioBitrate(sampleRate: Double, channels: Int) -> Int {
+        // Conservative defaults; prioritize stability and avoid waste at low sample rates.
+        let base: Int = (channels <= 1) ? 96_000 : 192_000
+        if sampleRate < 22_050 { return min(64_000, base / 2) }
+        if sampleRate < 44_100 { return min(96_000, base / 2) }
+        return base
+    }
+
+    private func logStartSettings(
+        fileURL: URL,
+        writerFileType: AVFileType,
+        videoWidth: Int,
+        videoHeight: Int,
+        fps: Int,
+        usedHEVC: Bool,
+        targetVideoBitrate: Int?,
+        audioLog: CameraAudioSettingsLog?
+    ) {
+        if let audioLog {
+            NSLog(
+                "📹 [CR_CAM_SETTINGS] file=%@ type=%@ v=%dx%d@%dfps codec=%@ vBR=%@ aRec=%@ aFmt=%d aSR=%.0fHz(%@) aCh=%@->%d overrideCh=%@ aBR=%@->%d layout=%@->%@",
+                fileURL.lastPathComponent,
+                writerFileType.rawValue,
+                videoWidth,
+                videoHeight,
+                fps,
+                usedHEVC ? "hevc" : "h264",
+                targetVideoBitrate.map(String.init(describing:)) ?? "nil",
+                audioLog.recommendedAvailable ? "ok" : "nil",
+                audioLog.formatIDFinal,
+                audioLog.sampleRateHz,
+                audioLog.sampleRateSource.rawValue,
+                audioLog.channelsRecommended.map(String.init(describing:)) ?? "nil",
+                audioLog.channelsFinal,
+                audioLog.didOverrideChannels ? "yes" : "no",
+                audioLog.bitrateRecommended.map(String.init(describing:)) ?? "nil",
+                audioLog.bitrateFinal,
+                audioLog.hadChannelLayoutRecommended ? "yes" : "no",
+                audioLog.hasChannelLayoutFinal ? "yes" : "no"
+            )
+        } else {
+            NSLog(
+                "📹 [CR_CAM_SETTINGS] file=%@ type=%@ v=%dx%d@%dfps codec=%@ vBR=%@ (no audio track)",
+                fileURL.lastPathComponent,
+                writerFileType.rawValue,
+                videoWidth,
+                videoHeight,
+                fps,
+                usedHEVC ? "hevc" : "h264",
+                targetVideoBitrate.map(String.init(describing:)) ?? "nil"
+            )
         }
     }
 
