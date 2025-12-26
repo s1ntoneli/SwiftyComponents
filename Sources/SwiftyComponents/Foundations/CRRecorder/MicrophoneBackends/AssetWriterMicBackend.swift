@@ -23,12 +23,17 @@ final class AssetWriterMicBackend: MicrophoneBackend {
     private var writerSessionStarted = false
     private var fileURL: URL?
     private var deviceSampleRate: Double?
-    private var deviceChannelCount: Int?
 
     private var startContinuation: CheckedContinuation<Void, Error>?
     private var acceptingSamples = true
     private var didSignalError = false
     private var stopState: StopState = .idle
+
+    private enum SampleRateSource: String {
+        case recommended
+        case deviceActiveFormat
+        case fallback48k
+    }
 
     func configure(session: AVCaptureSession, device: AVCaptureDevice, delegate: CaptureRecordingDelegate, queue: DispatchQueue) throws {
         self.session = session
@@ -42,10 +47,8 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         if let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(desc) {
             let asbd = asbdPtr.pointee
             deviceSampleRate = asbd.mSampleRate
-            deviceChannelCount = Int(asbd.mChannelsPerFrame)
         } else {
             deviceSampleRate = nil
-            deviceChannelCount = nil
         }
 
         let dataOut = AVCaptureAudioDataOutput()
@@ -53,6 +56,7 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         session.addOutput(dataOut)
         dataOut.setSampleBufferDelegate(delegate, queue: queue)
         self.audioDataOutput = dataOut
+        RecorderMicDiagnostics.shared.onConfigureCapture(device: device, audioOutput: dataOut)
 
         delegate.onAudioSample = { [weak self] sampleBuffer in
             self?.handleSample(sampleBuffer)
@@ -67,16 +71,78 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         let writer = try AVAssetWriter(url: fileURL, fileType: .m4a)
         // 固定 10s 片段
         writer.movieFragmentInterval = CMTime(seconds: 10, preferredTimescale: 600)
-        let sampleRate = deviceSampleRate ?? 48_000
-        // Follow the device's native channel count by default to avoid unintended downmix/upmix.
-        let ch = max(1, deviceChannelCount ?? 1)
-        let audioSettings: [String: Any] = [
-            AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: sampleRate,
-            AVNumberOfChannelsKey: ch,
-            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-            AVEncoderBitRateKey: 192_000
-        ]
+
+        let recommendedSettings = audioDataOutput?.recommendedAudioSettingsForAssetWriter(writingTo: .m4a) as? [String: Any]
+        var audioSettings: [String: Any] = recommendedSettings ?? [:]
+
+        // Make sure we always have a concrete sample rate for bitrate decisions / encoder stability.
+        let recommendedSampleRate = (audioSettings[AVSampleRateKey] as? NSNumber)?.doubleValue
+        let sampleRateSource: SampleRateSource
+        let sampleRate: Double
+        if let r = recommendedSampleRate {
+            sampleRate = r
+            sampleRateSource = .recommended
+        } else if let r = deviceSampleRate {
+            sampleRate = r
+            sampleRateSource = .deviceActiveFormat
+            audioSettings[AVSampleRateKey] = sampleRate
+        } else {
+            sampleRate = 48_000
+            sampleRateSource = .fallback48k
+            audioSettings[AVSampleRateKey] = sampleRate
+        }
+
+        // Keep the recommended encoding format when present; default to AAC for `.m4a` otherwise.
+        if audioSettings[AVFormatIDKey] == nil {
+            audioSettings[AVFormatIDKey] = kAudioFormatMPEG4AAC
+        }
+
+        // For stability/compatibility, clamp to <= 2 channels only when the recommended setting exceeds 2.
+        let recommendedChannels = (audioSettings[AVNumberOfChannelsKey] as? NSNumber)?.intValue
+        let finalChannels: Int
+        let didOverrideChannels: Bool
+        if let ch = recommendedChannels {
+            if ch > 2 {
+                finalChannels = 2
+                didOverrideChannels = true
+                audioSettings[AVNumberOfChannelsKey] = finalChannels
+                audioSettings.removeValue(forKey: AVChannelLayoutKey)
+            } else {
+                finalChannels = max(1, ch)
+                didOverrideChannels = false
+            }
+        } else {
+            finalChannels = 2
+            didOverrideChannels = true
+            audioSettings[AVNumberOfChannelsKey] = finalChannels
+            audioSettings.removeValue(forKey: AVChannelLayoutKey)
+        }
+
+        // Avoid having two "knobs" fighting; pick bitrate only.
+        audioSettings.removeValue(forKey: AVEncoderAudioQualityKey)
+        let computedBitrate = preferredBitrate(sampleRate: sampleRate, channels: finalChannels)
+        if let existing = (audioSettings[AVEncoderBitRateKey] as? NSNumber)?.intValue {
+            // If we changed the effective encoding constraints (e.g. clamped channels or had to supply our own sample rate),
+            // keep bitrate within a conservative computed bound to avoid waste and potential encoder constraints.
+            if didOverrideChannels || sampleRateSource != .recommended {
+                audioSettings[AVEncoderBitRateKey] = min(existing, computedBitrate)
+            }
+        } else {
+            audioSettings[AVEncoderBitRateKey] = computedBitrate
+        }
+
+        logStartSettings(
+            fileURL: fileURL,
+            recommendedSettings: recommendedSettings,
+            finalSettings: audioSettings,
+            sampleRateSource: sampleRateSource,
+            recommendedChannels: recommendedChannels,
+            finalChannels: finalChannels,
+            didOverrideChannels: didOverrideChannels
+        )
+
+        RecorderMicDiagnostics.shared.onStartWriter(audioSettings: audioSettings, processingOptions: processingOptions)
+
         let input = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
         input.expectsMediaDataInRealTime = true
         // Use linearGain as a simple per-track volume preference; keep processing in the writer to avoid manual PCM munging.
@@ -96,6 +162,67 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         // 等待首帧到来
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             self.startContinuation = continuation
+        }
+    }
+
+    private func preferredBitrate(sampleRate: Double, channels: Int) -> Int {
+        // Default: 192 kbps stereo AAC (good quality / reasonable size).
+        // For low sample rates, drop bitrate to avoid waste and potential encoder constraints.
+        let base: Int = (channels <= 1) ? 96_000 : 192_000
+        if sampleRate < 22_050 { return min(64_000, base / 2) }
+        if sampleRate < 44_100 { return min(96_000, base / 2) }
+        return base
+    }
+
+    private func logStartSettings(
+        fileURL: URL,
+        recommendedSettings: [String: Any]?,
+        finalSettings: [String: Any],
+        sampleRateSource: SampleRateSource,
+        recommendedChannels: Int?,
+        finalChannels: Int,
+        didOverrideChannels: Bool
+    ) {
+        func num<T: BinaryInteger>(_ key: String, in dict: [String: Any]) -> T? {
+            (dict[key] as? NSNumber).map { T($0.int64Value) }
+        }
+        func numDouble(_ key: String, in dict: [String: Any]) -> Double? {
+            (dict[key] as? NSNumber)?.doubleValue
+        }
+        func has(_ key: String, in dict: [String: Any]) -> Bool {
+            dict[key] != nil
+        }
+
+        let recSR = recommendedSettings.flatMap { numDouble(AVSampleRateKey, in: $0) }
+        let finSR = numDouble(AVSampleRateKey, in: finalSettings) ?? 0
+        let recBR: Int? = recommendedSettings.flatMap { num(AVEncoderBitRateKey, in: $0) as Int? }
+        let finBR: Int = num(AVEncoderBitRateKey, in: finalSettings) ?? 0
+        let recFmt: Int? = recommendedSettings.flatMap { num(AVFormatIDKey, in: $0) as Int? }
+        let finFmt: Int = num(AVFormatIDKey, in: finalSettings) ?? 0
+
+        let recLayout = recommendedSettings.map { has(AVChannelLayoutKey, in: $0) } ?? false
+        let finLayout = has(AVChannelLayoutKey, in: finalSettings)
+
+        NSLog(
+            "🎤 [CR_MIC_SETTINGS] file=%@ rec=%@ -> final: fmt=%d sr=%.0fHz(%@) ch=%@->%d overrideCh=%@ br=%@->%d layout=%@->%@",
+            fileURL.lastPathComponent,
+            recommendedSettings == nil ? "nil" : "ok",
+            finFmt,
+            finSR,
+            sampleRateSource.rawValue,
+            recommendedChannels.map(String.init(describing:)) ?? "nil",
+            finalChannels,
+            didOverrideChannels ? "yes" : "no",
+            recBR.map(String.init(describing:)) ?? "nil",
+            finBR,
+            recLayout ? "yes" : "no",
+            finLayout ? "yes" : "no"
+        )
+        if let recSR, abs(recSR - finSR) > 0.5 {
+            NSLog("🎤 [CR_MIC_SETTINGS] sampleRate adjusted: rec=%.0fHz final=%.0fHz", recSR, finSR)
+        }
+        if let recFmt, recFmt != finFmt {
+            NSLog("🎤 [CR_MIC_SETTINGS] formatID adjusted: rec=%d final=%d", recFmt, finFmt)
         }
     }
 
@@ -208,144 +335,6 @@ final class AssetWriterMicBackend: MicrophoneBackend {
         if !ok, writer.status == .failed {
             signalErrorOnce(writer.error ?? RecordingError.recordingFailed("Audio append failed"))
         }
-    }
-
-    private func process(_ sampleBuffer: CMSampleBuffer) -> CMSampleBuffer? {
-        guard let formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer) else { return nil }
-        guard let asbdPtr = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc) else { return nil }
-        let asbd = asbdPtr.pointee
-        let channels = Int(asbd.mChannelsPerFrame)
-        let bits = Int(asbd.mBitsPerChannel)
-        guard let block = CMSampleBufferGetDataBuffer(sampleBuffer) else { return nil }
-
-        var totalLength: Int = 0
-        var dataPointer: UnsafeMutablePointer<Int8>? = nil
-        let status = CMBlockBufferGetDataPointer(block, atOffset: 0, lengthAtOffsetOut: nil, totalLengthOut: &totalLength, dataPointerOut: &dataPointer)
-        guard status == noErr, let basePtr = dataPointer, totalLength > 0 else { return nil }
-
-        // Copy samples into new buffer we can modify safely
-        let byteCount = totalLength
-        let newData = UnsafeMutableRawPointer.allocate(byteCount: byteCount, alignment: MemoryLayout<Int16>.alignment)
-        newData.copyMemory(from: UnsafeRawPointer(basePtr), byteCount: byteCount)
-
-        // Apply gain/AGC/limiter in-place
-        let gainLinearBase: Float = max(0.0, processingOptions.linearGain)
-        let enableAGC = processingOptions.enableAGC
-        let targetRMS = max(1e-4, min(0.9, processingOptions.agcTargetRMS))
-        let maxAGCLinear = powf(10.0, processingOptions.agcMaxGainDb / 20.0)
-        let enableLimiter = processingOptions.enableLimiter
-
-        if bits == 16 {
-            let samples = newData.bindMemory(to: Int16.self, capacity: byteCount / 2)
-            let frameCount = (byteCount / 2) / max(1, channels)
-
-            // Compute RMS per buffer (use first channel)
-            var rmsAccum: Double = 0
-            for i in 0..<frameCount {
-                let s = Float(samples[i * channels]) / Float(Int16.max)
-                rmsAccum += Double(s * s)
-            }
-            let rms = sqrt(rmsAccum / Double(max(1, frameCount)))
-
-            var agcGain: Float = 1.0
-            if enableAGC {
-                let desired = Float(targetRMS) / max(1e-6, Float(rms))
-                agcGain = min(maxAGCLinear, desired)
-                // Smooth the AGC gain to avoid pumping
-                let alpha: Float = 0.1
-                agcSmoothedGain = alpha * agcGain + (1 - alpha) * agcSmoothedGain
-                agcGain = agcSmoothedGain
-            }
-            let totalGain = max(0.0, gainLinearBase) * agcGain
-
-            for i in 0..<(frameCount * channels) {
-                let x = Float(samples[i]) / Float(Int16.max)
-                var y = x * totalGain
-                if enableLimiter {
-                    // simple soft clip
-                    y = tanh(y * 2.0)
-                }
-                let clamped = max(-1.0, min(1.0, y))
-                samples[i] = Int16(clamped * Float(Int16.max))
-            }
-        } else if bits == 32 {
-            // Assume 32-bit float
-            let samples = newData.bindMemory(to: Float.self, capacity: byteCount / 4)
-            let frameCount = (byteCount / 4) / max(1, channels)
-
-            var rmsAccum: Double = 0
-            for i in 0..<frameCount {
-                let s = samples[i * channels]
-                rmsAccum += Double(s * s)
-            }
-            let rms = sqrt(rmsAccum / Double(max(1, frameCount)))
-
-            var agcGain: Float = 1.0
-            if enableAGC {
-                let desired = Float(targetRMS) / max(1e-6, Float(rms))
-                agcGain = min(maxAGCLinear, desired)
-                let alpha: Float = 0.1
-                agcSmoothedGain = alpha * agcGain + (1 - alpha) * agcSmoothedGain
-                agcGain = agcSmoothedGain
-            }
-            let totalGain = max(0.0, gainLinearBase) * agcGain
-
-            for i in 0..<(frameCount * channels) {
-                var y = samples[i] * totalGain
-                if enableLimiter {
-                    y = tanh(y * 2.0)
-                }
-                samples[i] = max(-1.0, min(1.0, y))
-            }
-        } else {
-            // Unsupported format - fallback
-            newData.deallocate()
-            return nil
-        }
-
-        // Build new CMBlockBuffer / CMSampleBuffer with modified data
-        var newBlock: CMBlockBuffer? = nil
-        var status2 = CMBlockBufferCreateWithMemoryBlock(
-            allocator: kCFAllocatorDefault,
-            memoryBlock: newData,
-            blockLength: byteCount,
-            blockAllocator: kCFAllocatorDefault,
-            customBlockSource: nil,
-            offsetToData: 0,
-            dataLength: byteCount,
-            flags: 0,
-            blockBufferOut: &newBlock
-        )
-        guard status2 == kCMBlockBufferNoErr, let newBlockUnwrapped = newBlock else {
-            newData.deallocate()
-            return nil
-        }
-
-        var newSample: CMSampleBuffer? = nil
-        var timingInfoCount: CMItemCount = 0
-        CMSampleBufferGetSampleTimingInfoArray(sampleBuffer, entryCount: 0, arrayToFill: nil, entriesNeededOut: &timingInfoCount)
-        var timingInfo = [CMSampleTimingInfo](repeating: .init(duration: .invalid, presentationTimeStamp: .invalid, decodeTimeStamp: .invalid), count: timingInfoCount)
-        if timingInfoCount > 0 {
-            CMSampleBufferGetSampleTimingInfoArray(sampleBuffer, entryCount: timingInfoCount, arrayToFill: &timingInfo, entriesNeededOut: &timingInfoCount)
-        }
-        status2 = CMSampleBufferCreate(
-            allocator: kCFAllocatorDefault,
-            dataBuffer: newBlockUnwrapped,
-            dataReady: true,
-            makeDataReadyCallback: nil,
-            refcon: nil,
-            formatDescription: formatDesc,
-            sampleCount: CMSampleBufferGetNumSamples(sampleBuffer),
-            sampleTimingEntryCount: timingInfoCount,
-            sampleTimingArray: &timingInfo,
-            sampleSizeEntryCount: 0,
-            sampleSizeArray: nil,
-            sampleBufferOut: &newSample
-        )
-        guard status2 == noErr, let newSampleUnwrapped = newSample else {
-            return nil
-        }
-        return newSampleUnwrapped
     }
 
     // MARK: - Observers → onError
