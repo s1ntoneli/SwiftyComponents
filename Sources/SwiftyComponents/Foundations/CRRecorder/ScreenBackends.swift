@@ -120,9 +120,22 @@ final class AVFoundationScreenRecorderBackend: NSObject, @unchecked Sendable, Sc
             throw AVScreenRecorder.RecorderError.configurationFailed("Cannot resolve bounds for window \(windowID)")
         }
         let resolvedDisplay = displayIDForWindow(bounds: bounds, fallback: displayID ?? CGMainDisplayID())
+        // `kCGWindowBounds` 给出的是“全局桌面坐标系”的窗口 bounds；
+        // 但 `AVCaptureScreenInput(displayID:)` 的 cropRect 需要的是“显示器内部坐标系”（相对于该显示器左上角）。
+        // 如果不做坐标原点平移，在副屏/负坐标布局下会出现位置、比例、裁切错误。
+        let displayBounds = CGDisplayBounds(resolvedDisplay)
+        let localBounds = bounds
+            .offsetBy(dx: -displayBounds.origin.x, dy: -displayBounds.origin.y)
+            .intersection(CGRect(origin: .zero, size: displayBounds.size))
+            .integral
+        guard !localBounds.isNull, !localBounds.isEmpty else {
+            throw AVScreenRecorder.RecorderError.configurationFailed(
+                "Window \(windowID) bounds \(bounds) not visible on display \(resolvedDisplay) bounds \(displayBounds)"
+            )
+        }
         let config = AVScreenRecorder.Configuration(
             displayID: resolvedDisplay,
-            cropRect: bounds,
+            cropRect: localBounds,
             showsCursor: showsCursor,
             capturesMouseClicks: false,
             fps: frameRate
