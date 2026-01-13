@@ -206,12 +206,29 @@ final class AssetWriterCamBackend: CameraBackend {
                 return
             }
 
-            var width = 1280
-            var height = 720
-            if let img = CMSampleBufferGetImageBuffer(sampleBuffer) {
-                width = CVPixelBufferGetWidth(img)
-                height = CVPixelBufferGetHeight(img)
+            guard let img = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+                #if DEBUG
+                NSLog("📹 [CR_CAM_WRITE] firstFrame missing image buffer; waiting for next frame")
+                #endif
+                return
             }
+            let width = CVPixelBufferGetWidth(img)
+            let height = CVPixelBufferGetHeight(img)
+            #if DEBUG
+            if let d = device {
+                let fmt = CMVideoFormatDescriptionGetDimensions(d.activeFormat.formatDescription)
+                NSLog(
+                    "📹 [CR_CAM_WRITE] firstFrame=%dx%d device=%@ activeFormat=%dx%d",
+                    width,
+                    height,
+                    d.localizedName,
+                    fmt.width,
+                    fmt.height
+                )
+            } else {
+                NSLog("📹 [CR_CAM_WRITE] firstFrame=%dx%d device=nil", width, height)
+            }
+            #endif
             // 依据分辨率与帧率估算目标码率；默认 H.264，可按开关尝试 HEVC
             let fps: Int = {
                 if let override = options.bitrateFPSOverride, override > 0 {

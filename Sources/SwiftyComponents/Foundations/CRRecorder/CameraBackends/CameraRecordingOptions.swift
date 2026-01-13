@@ -3,7 +3,7 @@ import AVFoundation
 
 public struct CameraRecordingOptions: Sendable, Equatable, Hashable {
     // Resolution preset; nil keeps device default
-    public var preset: AVCaptureSession.Preset? = .hd1280x720
+    public var preset: AVCaptureSession.Preset? = nil
     // Prefer HEVC encoding when available
     public var preferHEVC: Bool = false
     // Bitrate estimation coefficients (bits-per-pixel per frame)
@@ -16,7 +16,7 @@ public struct CameraRecordingOptions: Sendable, Equatable, Hashable {
     /// If nil, the backend derives FPS from the active device or falls back to a default.
     public var bitrateFPSOverride: Int? = nil
 
-    public init(preset: AVCaptureSession.Preset? = .hd1280x720,
+    public init(preset: AVCaptureSession.Preset? = nil,
                 preferHEVC: Bool = false,
                 bppH264: Double = 0.060,
                 bppHEVC: Double = 0.035,

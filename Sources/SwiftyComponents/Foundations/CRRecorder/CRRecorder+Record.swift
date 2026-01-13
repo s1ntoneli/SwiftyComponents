@@ -80,15 +80,24 @@ class CRCameraRecording {
             device = d
         }
 
+        #if DEBUG
+        let d = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        NSLog(
+            "📹 [CR_CAM_FMT] device=%@ modelID=%@ type=%@ activeFormat=%dx%d",
+            device.localizedName,
+            device.modelID,
+            device.deviceType.rawValue,
+            d.width,
+            d.height
+        )
+        #endif
+
         let input = try AVCaptureDeviceInput(device: device)
         let session = AVCaptureSession()
         session.beginConfiguration()
-        // 分辨率开关（默认为 720p，可置空维持设备原生分辨率）
-        if let preset = options.preset, session.canSetSessionPreset(preset) {
-            session.sessionPreset = preset
-        }
         guard session.canAddInput(input) else { throw RecordingError.cannotAddInput }
         session.addInput(input)
+        // Do not force any session preset; always use the device's native output settings.
         // 不强制降帧，保持设备默认或用户设置的高帧率，体积控制交由编码器码率完成。
         session.commitConfiguration()
 
@@ -180,11 +189,23 @@ class CRAppleDeviceRecording {
     func prepare(deviceId: String) async throws {
         NSLog("🔧 AppleDevice录制准备中... - 设备ID: \(deviceId)")
         guard let device = AVCaptureDevice(uniqueID: deviceId) else { throw RecordingError.deviceNotFound }
+        #if DEBUG
+        let d = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+        NSLog(
+            "📱 [CR_APPLE_FMT] device=%@ modelID=%@ type=%@ activeFormat=%dx%d",
+            device.localizedName,
+            device.modelID,
+            device.deviceType.rawValue,
+            d.width,
+            d.height
+        )
+        #endif
         let input = try AVCaptureDeviceInput(device: device)
         let session = AVCaptureSession()
         session.beginConfiguration()
         guard session.canAddInput(input) else { throw RecordingError.cannotAddInput }
         session.addInput(input)
+        // Do not force any session preset; always use the device's native output settings.
         // 试图为 Apple 设备添加对应的音频输入（名称匹配）
         // QuickTime 的做法是同时选择 iPhone 作为视频源和麦克风源
         session.commitConfiguration()
