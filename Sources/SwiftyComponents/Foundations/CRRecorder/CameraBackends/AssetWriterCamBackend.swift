@@ -39,6 +39,9 @@ final class AssetWriterCamBackend: CameraBackend {
     // 对齐音频时间轴：记录首帧视频 PTS 以及音频的时间偏移，避免“系统音频”设备使用不同时钟导致长时间静止帧。
     private var firstVideoPTS: CMTime?
     private var audioTimeOffset: CMTime?
+    private var expectedVideoDimensions: (width: Int, height: Int)?
+    private var expectedVideoDimensionsFirstSampleAt: CFAbsoluteTime?
+    private var expectedVideoDimensionsMismatchCount: Int = 0
 
     func apply(options: CameraRecordingOptions) { self.options = options }
     private var didSignalError = false
@@ -97,6 +100,14 @@ final class AssetWriterCamBackend: CameraBackend {
 
     func start(fileURL: URL) async throws {
         self.fileURL = fileURL
+        if let device {
+            let d = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+            self.expectedVideoDimensions = (width: Int(d.width), height: Int(d.height))
+        } else {
+            self.expectedVideoDimensions = nil
+        }
+        self.expectedVideoDimensionsFirstSampleAt = nil
+        self.expectedVideoDimensionsMismatchCount = 0
         // 更新诊断中心文件路径，便于外部观察文件大小增长/片段刷新
         RecorderDiagnostics.shared.setOutputFileURL(fileURL)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -197,6 +208,45 @@ final class AssetWriterCamBackend: CameraBackend {
         if writer == nil {
             // 按首帧尺寸创建视频输入与写入器
             guard let url = fileURL else { return }
+            guard let img = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+                #if DEBUG
+                NSLog("📹 [CR_CAM_WRITE] firstFrame missing image buffer; waiting for next frame")
+                #endif
+                return
+            }
+            let width = CVPixelBufferGetWidth(img)
+            let height = CVPixelBufferGetHeight(img)
+
+            if let expected = expectedVideoDimensions, (width != expected.width || height != expected.height) {
+                if expectedVideoDimensionsFirstSampleAt == nil { expectedVideoDimensionsFirstSampleAt = CFAbsoluteTimeGetCurrent() }
+                let elapsed = (expectedVideoDimensionsFirstSampleAt.map { CFAbsoluteTimeGetCurrent() - $0 }) ?? 0
+                expectedVideoDimensionsMismatchCount += 1
+                // Best-effort: wait briefly for AVFoundation renegotiation to settle.
+                if elapsed < 1.0 && expectedVideoDimensionsMismatchCount < 60 {
+                    #if DEBUG
+                    NSLog(
+                        "📹 [CR_CAM_WRITE] waiting expected=%dx%d got=%dx%d (elapsed=%.2fs count=%d)",
+                        expected.width,
+                        expected.height,
+                        width,
+                        height,
+                        elapsed,
+                        expectedVideoDimensionsMismatchCount
+                    )
+                    #endif
+                    return
+                }
+                #if DEBUG
+                NSLog(
+                    "📹 [CR_CAM_WRITE] expected=%dx%d not observed; continue with firstFrame=%dx%d",
+                    expected.width,
+                    expected.height,
+                    width,
+                    height
+                )
+                #endif
+            }
+
             do {
                 self.writer = try AVAssetWriter(url: url, fileType: .mov)
                 // 与屏幕录制保持一致，使用可调的 fragment 间隔，便于实时分段写入
@@ -206,14 +256,6 @@ final class AssetWriterCamBackend: CameraBackend {
                 return
             }
 
-            guard let img = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-                #if DEBUG
-                NSLog("📹 [CR_CAM_WRITE] firstFrame missing image buffer; waiting for next frame")
-                #endif
-                return
-            }
-            let width = CVPixelBufferGetWidth(img)
-            let height = CVPixelBufferGetHeight(img)
             #if DEBUG
             if let d = device {
                 let fmt = CMVideoFormatDescriptionGetDimensions(d.activeFormat.formatDescription)

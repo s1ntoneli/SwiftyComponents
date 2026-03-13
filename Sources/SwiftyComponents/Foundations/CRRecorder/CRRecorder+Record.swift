@@ -7,6 +7,80 @@
 
 import AVFoundation
 import ReplayKit
+
+private func crMaybeSelectPreferredOrientationIfNeeded(device: AVCaptureDevice, options: CameraRecordingOptions) {
+    let pref = options.videoOrientationPreference
+    guard pref != .auto else { return }
+
+    let current = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+    let isCurrentlyLandscape = current.width >= current.height
+    if pref == .landscape, isCurrentlyLandscape { return }
+    if pref == .portrait, !isCurrentlyLandscape { return }
+
+    let currentArea = Int64(current.width) * Int64(current.height)
+    let currentSubtype = CMFormatDescriptionGetMediaSubType(device.activeFormat.formatDescription)
+
+    func isDesiredOrientation(_ dims: CMVideoDimensions) -> Bool {
+        switch pref {
+        case .auto:
+            return true
+        case .landscape:
+            return dims.width >= dims.height
+        case .portrait:
+            return dims.height > dims.width
+        }
+    }
+
+    let allCandidates = device.formats.filter { fmt in
+        let d = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
+        return isDesiredOrientation(d)
+    }
+
+    let subtypeCandidates = allCandidates.filter { fmt in
+        CMFormatDescriptionGetMediaSubType(fmt.formatDescription) == currentSubtype
+    }
+    let candidates = subtypeCandidates.isEmpty ? allCandidates : subtypeCandidates
+
+    guard !candidates.isEmpty else { return }
+
+    func rank(_ fmt: AVCaptureDevice.Format) -> (delta: Int64, negArea: Int64) {
+        let d = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
+        let area = Int64(d.width) * Int64(d.height)
+        return (delta: abs(area - currentArea), negArea: -area)
+    }
+
+    let best = candidates.min { a, b in
+        let ra = rank(a)
+        let rb = rank(b)
+        if ra.delta != rb.delta { return ra.delta < rb.delta }
+        return ra.negArea < rb.negArea
+    }
+
+    guard let best else { return }
+    let bestDims = CMVideoFormatDescriptionGetDimensions(best.formatDescription)
+    if bestDims.width == current.width, bestDims.height == current.height { return }
+
+    do {
+        try device.lockForConfiguration()
+        device.activeFormat = best
+        device.unlockForConfiguration()
+        #if DEBUG
+        NSLog(
+            "📹 [CR_CAM_FMT_SELECT] device=%@ activeFormat %dx%d -> %dx%d (pref=%@)",
+            device.localizedName,
+            current.width,
+            current.height,
+            bestDims.width,
+            bestDims.height,
+            pref.rawValue
+        )
+        #endif
+    } catch {
+        #if DEBUG
+        NSLog("📹 [CR_CAM_FMT_SELECT] lock/set failed: %@", error.localizedDescription)
+        #endif
+    }
+}
 //
 //enum RecordingError: Error {
 //    case deviceNotFound
@@ -44,6 +118,7 @@ class CRCameraRecording {
     var endTime: CFAbsoluteTime = 0
     var startURL: URL? = nil
     var isPrepared: Bool = false
+    private var device: AVCaptureDevice? = nil
     // 对外回调（供 CRRecorder 注入）
     var onError: (Error) -> Void = { _ in }
     var onComplete: (URL) -> Void = { _ in }
@@ -79,6 +154,9 @@ class CRCameraRecording {
             guard let d = AVCaptureDevice.default(for: .video) else { throw RecordingError.deviceNotFound }
             device = d
         }
+
+        self.device = device
+        crMaybeSelectPreferredOrientationIfNeeded(device: device, options: options)
 
         #if DEBUG
         let d = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
@@ -117,6 +195,7 @@ class CRCameraRecording {
         guard isPrepared else { throw RecordingError.notPrepared }
         guard session?.isRunning == true else { throw RecordingError.sessionNotRunning }
         self.startURL = fileURL
+        if let device { crMaybeSelectPreferredOrientationIfNeeded(device: device, options: options) }
         backend.onFirstPTS = { [weak self] time in self?.startTime = time.seconds }
         try await backend.start(fileURL: fileURL)
     }
@@ -166,6 +245,7 @@ class CRAppleDeviceRecording {
     var endTime: CFAbsoluteTime = 0
     var startURL: URL? = nil
     var isPrepared: Bool = false
+    private var device: AVCaptureDevice? = nil
     // 对外回调
     var onError: (Error) -> Void = { _ in }
     var onComplete: ([CRRecorder.BundleInfo.FileAsset]) -> Void = { _ in }
@@ -189,6 +269,10 @@ class CRAppleDeviceRecording {
     func prepare(deviceId: String) async throws {
         NSLog("🔧 AppleDevice录制准备中... - 设备ID: \(deviceId)")
         guard let device = AVCaptureDevice(uniqueID: deviceId) else { throw RecordingError.deviceNotFound }
+
+        self.device = device
+        crMaybeSelectPreferredOrientationIfNeeded(device: device, options: options)
+
         #if DEBUG
         let d = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
         NSLog(
@@ -226,6 +310,7 @@ class CRAppleDeviceRecording {
         guard isPrepared else { throw RecordingError.notPrepared }
         guard session?.isRunning == true else { throw RecordingError.sessionNotRunning }
         self.startURL = fileURL
+        if let device { crMaybeSelectPreferredOrientationIfNeeded(device: device, options: options) }
         backend.onFirstPTS = { [weak self] time in self?.startTime = time.seconds }
         try await backend.start(fileURL: fileURL)
     }

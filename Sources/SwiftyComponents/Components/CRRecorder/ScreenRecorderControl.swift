@@ -73,6 +73,12 @@ public struct ScreenRecorderControl: View {
     @AppStorage("CRDemo.SelectedMicrophoneID") private var persistedMicID: String = "default"
     @AppStorage("CRDemo.IncludeCamera") private var persistedCamera: Bool = false
     @AppStorage("CRDemo.SelectedCameraID") private var persistedCamID: String = "default"
+    @AppStorage("CRDemo.CameraOrientationPref") private var persistedCamOrientationPref: String = CameraOrientationChoice.auto.rawValue
+    private enum CameraOrientationChoice: String, CaseIterable {
+        case auto
+        case landscape
+        case portrait
+    }
     private enum BackendChoice: String, CaseIterable {
         case screenCaptureKit
         case avFoundation
@@ -258,6 +264,16 @@ public struct ScreenRecorderControl: View {
                         }
                         .frame(minWidth: 220)
                         .accessibilityIdentifier("CRRecorder.Picker.Camera")
+                    }
+                    HStack(spacing: 8) {
+                        Text("Cam Orient:")
+                        Picker("Camera Orientation", selection: $persistedCamOrientationPref) {
+                            Text("Auto").tag(CameraOrientationChoice.auto.rawValue)
+                            Text("Landscape").tag(CameraOrientationChoice.landscape.rawValue)
+                            Text("Portrait").tag(CameraOrientationChoice.portrait.rawValue)
+                        }
+                        .frame(minWidth: 220)
+                        .accessibilityIdentifier("CRRecorder.Picker.CameraOrientation")
                     }
                 }
                 HStack(spacing: 8) {
@@ -644,11 +660,12 @@ public struct ScreenRecorderControl: View {
         if persistedCamera {
             let camName = fileName + "-cam"
             let camID = selectedCameraID ?? persistedCamID
+            let pref = CameraRecordingOptions.VideoOrientationPreference(rawValue: persistedCamOrientationPref) ?? .auto
             schemes.append(
                 .camera(
                     cameraID: camID.isEmpty ? "default" : camID,
                     filename: camName,
-                    cameraOptions: .init()
+                    cameraOptions: .init(videoOrientationPreference: pref)
                 )
             )
         }
