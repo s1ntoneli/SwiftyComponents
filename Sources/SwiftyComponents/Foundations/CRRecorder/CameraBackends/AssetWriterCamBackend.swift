@@ -22,6 +22,8 @@ final class AssetWriterCamBackend: CameraBackend {
     private var audioDataOutput: AVCaptureAudioDataOutput?
     private weak var device: AVCaptureDevice?
     private var callbackQueue: DispatchQueue?
+    private var sharedPreviewCameraID: String?
+    private var sharedPreviewConsumerID: UUID?
 
     private var writer: AVAssetWriter?
     private var videoInput: AVAssetWriterInput?
@@ -55,6 +57,19 @@ final class AssetWriterCamBackend: CameraBackend {
         self.device = device
         self.observedDeviceID = device?.uniqueID
         self.callbackQueue = queue
+
+        if let sharedPreviewCameraID {
+            self.hasAudioInputInSession = false
+            delegate.onVideoSample = nil
+            delegate.onAudioSample = nil
+            installObservers(for: session)
+            let consumerID = UUID()
+            self.sharedPreviewConsumerID = consumerID
+            SharedCameraPreviewVideoOutputRouter.shared.addConsumer(cameraID: sharedPreviewCameraID, consumerID: consumerID) { [weak self] sampleBuffer in
+                self?.handleVideoSample(sampleBuffer)
+            }
+            return
+        }
 
         session.beginConfiguration()
         // 视频数据输出
@@ -98,6 +113,10 @@ final class AssetWriterCamBackend: CameraBackend {
         installObservers(for: session)
     }
 
+    func prepareSharedPreview(cameraID: String?) {
+        sharedPreviewCameraID = cameraID
+    }
+
     func start(fileURL: URL) async throws {
         self.fileURL = fileURL
         if let device {
@@ -139,9 +158,15 @@ final class AssetWriterCamBackend: CameraBackend {
                 // 停止回调，防止在标记 finished 后仍有 append 发生
                 self.videoDataOutput?.setSampleBufferDelegate(nil, queue: nil)
                 self.audioDataOutput?.setSampleBufferDelegate(nil, queue: nil)
+                if let sharedPreviewCameraID, let sharedPreviewConsumerID {
+                    SharedCameraPreviewVideoOutputRouter.shared.removeConsumer(cameraID: sharedPreviewCameraID, consumerID: sharedPreviewConsumerID)
+                    self.sharedPreviewConsumerID = nil
+                }
 
                 func cleanupAndResume(_ result: Result<Void, Error>) {
-                    AVCaptureSessionHelper.stopRecordingStep2Close(avSession: session)
+                    if self.sharedPreviewCameraID == nil {
+                        self.detachConfiguredOutputs(from: session)
+                    }
                     self.removeObservers()
                     self.stopState = .stopped
                     switch result {
@@ -594,6 +619,20 @@ final class AssetWriterCamBackend: CameraBackend {
                 _ = input.append(dup)
             }
         }
+    }
+
+    private func detachConfiguredOutputs(from session: AVCaptureSession) {
+        session.beginConfiguration()
+        if let videoDataOutput, session.outputs.contains(videoDataOutput) {
+            session.removeOutput(videoDataOutput)
+        }
+        if let audioDataOutput, session.outputs.contains(audioDataOutput) {
+            session.removeOutput(audioDataOutput)
+        }
+        session.commitConfiguration()
+
+        self.videoDataOutput = nil
+        self.audioDataOutput = nil
     }
 }
 

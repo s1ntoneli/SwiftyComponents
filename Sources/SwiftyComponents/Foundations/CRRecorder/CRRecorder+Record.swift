@@ -112,6 +112,11 @@ private func crMaybeSelectPreferredOrientationIfNeeded(device: AVCaptureDevice, 
 //}
 
 class CRCameraRecording {
+    private enum SessionOwnership {
+        case owned
+        case sharedPreview
+    }
+
     var session: AVCaptureSession?
     var delegate: CaptureRecordingDelegate = CaptureRecordingDelegate()
     var startTime: CFAbsoluteTime = 0
@@ -129,6 +134,7 @@ class CRCameraRecording {
     private let backend: CameraBackend = AssetWriterCamBackend()
     private var isStopping: Bool = false
     private var cachedAssets: [CRRecorder.BundleInfo.FileAsset]? = nil
+    private var sessionOwnership: SessionOwnership = .owned
 
     init() {
         print("📹 CRCameraRecording 初始化")
@@ -155,7 +161,17 @@ class CRCameraRecording {
             device = d
         }
 
+        if let sharedContext = SharedCameraPreviewSessionRegistry.shared.context(for: cameraId) {
+            try await prepare(existingSession: sharedContext.session, device: sharedContext.device, ownership: .sharedPreview, cameraID: cameraId)
+            return
+        }
+
+        try await prepare(existingSession: nil, device: device, ownership: .owned, cameraID: cameraId)
+    }
+
+    private func prepare(existingSession: AVCaptureSession?, device: AVCaptureDevice, ownership: SessionOwnership, cameraID: String) async throws {
         self.device = device
+        self.sessionOwnership = ownership
         crMaybeSelectPreferredOrientationIfNeeded(device: device, options: options)
 
         #if DEBUG
@@ -170,24 +186,48 @@ class CRCameraRecording {
         )
         #endif
 
-        let input = try AVCaptureDeviceInput(device: device)
-        let session = AVCaptureSession()
-        session.beginConfiguration()
-        guard session.canAddInput(input) else { throw RecordingError.cannotAddInput }
-        session.addInput(input)
-        // Do not force any session preset; always use the device's native output settings.
-        // 不强制降帧，保持设备默认或用户设置的高帧率，体积控制交由编码器码率完成。
-        session.commitConfiguration()
+        let session: AVCaptureSession
+        if let existingSession {
+            session = existingSession
+        } else {
+            let input = try AVCaptureDeviceInput(device: device)
+            let createdSession = AVCaptureSession()
+            createdSession.beginConfiguration()
+            guard createdSession.canAddInput(input) else { throw RecordingError.cannotAddInput }
+            createdSession.addInput(input)
+            createdSession.commitConfiguration()
+            session = createdSession
+        }
 
         // 传入编码与码率开关
         backend.apply(options: options)
+        if ownership == .sharedPreview {
+            backend.prepareSharedPreview(cameraID: device.uniqueID)
+        } else {
+            backend.prepareSharedPreview(cameraID: nil)
+        }
         try backend.configure(session: session, device: device, delegate: delegate, queue: DispatchQueue(label: "com.recorderkit.camera.video", qos: .userInitiated))
 
-        session.startRunning()
+        if !session.isRunning {
+            session.startRunning()
+        }
         guard session.isRunning else { throw RecordingError.sessionFailedToStart }
+
+        if ownership == .sharedPreview {
+            await stabilizeSharedPreviewOrientationIfNeeded(device: device)
+        }
+
         self.session = session
         self.isPrepared = true
         print("✅ 摄像头录制准备完成，数据流已启动")
+    }
+
+    private func stabilizeSharedPreviewOrientationIfNeeded(device: AVCaptureDevice) async {
+        guard options.videoOrientationPreference != .auto else { return }
+
+        crMaybeSelectPreferredOrientationIfNeeded(device: device, options: options)
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        crMaybeSelectPreferredOrientationIfNeeded(device: device, options: options)
     }
 
     func start(fileURL: URL) async throws {
@@ -195,7 +235,9 @@ class CRCameraRecording {
         guard isPrepared else { throw RecordingError.notPrepared }
         guard session?.isRunning == true else { throw RecordingError.sessionNotRunning }
         self.startURL = fileURL
-        if let device { crMaybeSelectPreferredOrientationIfNeeded(device: device, options: options) }
+        if sessionOwnership == .owned, let device {
+            crMaybeSelectPreferredOrientationIfNeeded(device: device, options: options)
+        }
         backend.onFirstPTS = { [weak self] time in self?.startTime = time.seconds }
         try await backend.start(fileURL: fileURL)
     }
@@ -216,7 +258,7 @@ class CRCameraRecording {
         print("🛑 停止摄像头录制")
         endTime = CFAbsoluteTimeGetCurrent()
         let url = try await backend.stop()
-        if let s = session { AVCaptureSessionHelper.stopRecordingStep2Close(avSession: s) }
+        if sessionOwnership == .owned, let s = session { AVCaptureSessionHelper.stopRecordingStep2Close(avSession: s) }
         if let url {
             let assets = [CRRecorder.BundleInfo.FileAsset(filename: url.lastPathComponent, tyle: .webcam, recordingStartTimestamp: startTime, recordingEndTimestamp: endTime)]
             cachedAssets = assets

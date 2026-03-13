@@ -14,6 +14,7 @@ protocol CameraBackend: AnyObject {
     ///   - delegate: A shared capture delegate which will receive sample buffers.
     ///   - queue: Dispatch queue used for sample callbacks.
     func configure(session: AVCaptureSession, device: AVCaptureDevice?, delegate: CaptureRecordingDelegate, queue: DispatchQueue) throws
+    func prepareSharedPreview(cameraID: String?)
     func start(fileURL: URL) async throws
     func stop() async throws -> URL?
     func apply(options: CameraRecordingOptions)
@@ -21,4 +22,5 @@ protocol CameraBackend: AnyObject {
 
 extension CameraBackend {
     func apply(options: CameraRecordingOptions) { /* default no-op */ }
+    func prepareSharedPreview(cameraID: String?) { /* default no-op */ }
 }
