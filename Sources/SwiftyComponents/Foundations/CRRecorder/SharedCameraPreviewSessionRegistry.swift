@@ -88,6 +88,7 @@ public final class SharedCameraPreviewVideoOutputRouter: @unchecked Sendable {
 
     private let lock = NSLock()
     private var entries: [String: VideoEntry] = [:]
+    private var desiredMirroringByDeviceID: [String: Bool] = [:]
 
     private init() {}
 
@@ -99,7 +100,9 @@ public final class SharedCameraPreviewVideoOutputRouter: @unchecked Sendable {
 
         lock.lock()
         if let entry = entries[deviceID], entry.session === context.session {
+            let desiredMirroring = desiredMirroringByDeviceID[deviceID] ?? false
             lock.unlock()
+            applyMirroring(desiredMirroring, to: entry.output)
             return true
         }
         lock.unlock()
@@ -119,6 +122,7 @@ public final class SharedCameraPreviewVideoOutputRouter: @unchecked Sendable {
         context.session.addOutput(output)
         context.session.commitConfiguration()
         output.setSampleBufferDelegate(forwarder, queue: queue)
+        applyMirroring(currentDesiredMirroring(for: deviceID), to: output)
 
         let entry = VideoEntry(session: context.session, deviceID: deviceID, output: output, forwarder: forwarder)
         forwarder.onSample = { [weak self, weak entry] sampleBuffer in
@@ -133,6 +137,20 @@ public final class SharedCameraPreviewVideoOutputRouter: @unchecked Sendable {
         entries[deviceID] = entry
         lock.unlock()
         return true
+    }
+
+    @MainActor
+    public func setMirroring(_ isMirrored: Bool, for cameraID: String) {
+        guard let deviceID = resolvedDeviceID(for: cameraID) else { return }
+
+        lock.lock()
+        desiredMirroringByDeviceID[deviceID] = isMirrored
+        let output = entries[deviceID]?.output
+        lock.unlock()
+
+        if let output {
+            applyMirroring(isMirrored, to: output)
+        }
     }
 
     public func addConsumer(cameraID: String, consumerID: UUID, handler: @escaping (CMSampleBuffer) -> Void) {
@@ -163,5 +181,19 @@ public final class SharedCameraPreviewVideoOutputRouter: @unchecked Sendable {
         defer { lock.unlock() }
         guard let values = entries[deviceID]?.consumers.values else { return [] }
         return Array(values)
+    }
+
+    private func currentDesiredMirroring(for deviceID: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return desiredMirroringByDeviceID[deviceID] ?? false
+    }
+
+    private func applyMirroring(_ isMirrored: Bool, to output: AVCaptureVideoDataOutput) {
+        guard let connection = output.connection(with: .video) else { return }
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = isMirrored
+        }
     }
 }

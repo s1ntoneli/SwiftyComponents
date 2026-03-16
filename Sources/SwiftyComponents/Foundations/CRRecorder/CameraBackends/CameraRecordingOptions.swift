@@ -19,6 +19,8 @@ public struct CameraRecordingOptions: Sendable, Equatable, Hashable {
     ///   It does not perform any crop.
     /// - Note: Default is `.auto` to avoid impacting normal cameras.
     public var videoOrientationPreference: VideoOrientationPreference = .auto
+    // Mirror the captured video horizontally.
+    public var isMirrored: Bool = false
     // Prefer HEVC encoding when available
     public var preferHEVC: Bool = false
     // Bitrate estimation coefficients (bits-per-pixel per frame)
@@ -33,6 +35,7 @@ public struct CameraRecordingOptions: Sendable, Equatable, Hashable {
 
     public init(preset: AVCaptureSession.Preset? = nil,
                 videoOrientationPreference: VideoOrientationPreference = .auto,
+                isMirrored: Bool = false,
                 preferHEVC: Bool = false,
                 bppH264: Double = 0.060,
                 bppHEVC: Double = 0.035,
@@ -41,6 +44,7 @@ public struct CameraRecordingOptions: Sendable, Equatable, Hashable {
                 bitrateFPSOverride: Int? = nil) {
         self.preset = preset
         self.videoOrientationPreference = videoOrientationPreference
+        self.isMirrored = isMirrored
         self.preferHEVC = preferHEVC
         self.bppH264 = bppH264
         self.bppHEVC = bppHEVC

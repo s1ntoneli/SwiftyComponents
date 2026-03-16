@@ -77,6 +77,7 @@ final class AssetWriterCamBackend: CameraBackend {
         vdo.alwaysDiscardsLateVideoFrames = true
         guard session.canAddOutput(vdo) else { session.commitConfiguration(); throw RecordingError.cannotAddOutput }
         session.addOutput(vdo)
+        applyMirroring(options.isMirrored, to: vdo)
         vdo.setSampleBufferDelegate(delegate, queue: queue)
         self.videoDataOutput = vdo
 
@@ -515,6 +516,14 @@ final class AssetWriterCamBackend: CameraBackend {
         if sampleRate < 22_050 { return min(64_000, base / 2) }
         if sampleRate < 44_100 { return min(96_000, base / 2) }
         return base
+    }
+
+    private func applyMirroring(_ isMirrored: Bool, to output: AVCaptureVideoDataOutput) {
+        guard let connection = output.connection(with: .video) else { return }
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = isMirrored
+        }
     }
 
     private func logStartSettings(
