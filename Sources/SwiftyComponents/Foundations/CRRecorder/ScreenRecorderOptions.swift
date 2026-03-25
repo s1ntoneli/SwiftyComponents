@@ -13,7 +13,6 @@ struct ScreenRecorderOptions: Sendable, Equatable, Hashable {
     public var showsCursor: Bool
     /// 是否优先使用 HEVC 编码（具体行为由后端/平台决定）。
     public var useHEVC: Bool
-
     public init(
         fps: Int = 60,
         queueDepth: Int? = nil,

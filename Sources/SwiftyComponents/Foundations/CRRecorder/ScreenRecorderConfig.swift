@@ -17,6 +17,18 @@ enum RecorderConfig {
         let c = SCStreamConfiguration()
         c.showsCursor = options.showsCursor
         c.capturesAudio = captureSystemAudio
+        if #available(macOS 14.0, *) {
+            // Force the display stream onto the highest-quality capture path.
+            // Our diagnostics showed modern-vs-legacy softness already exists in the raw SCStream frame,
+            // before any writer append or encode step. The default automatic resolution choice is the
+            // narrowest boundary that can explain that behavior without widening the fix to other layers.
+            c.captureResolution = .best
+            c.preservesAspectRatio = true
+        }
+        // Explicitly disable scale-to-fit behavior so the capture path does not opt into any implicit
+        // up/down-scaling policy. This is mostly documented for window capture, but making it explicit
+        // keeps the stream configuration aligned with our exact width/height expectations.
+        c.scalesToFit = false
         if captureSystemAudio {
             c.sampleRate = 48000
             c.channelCount = 2
@@ -53,6 +65,11 @@ enum RecorderConfig {
         c.height = Int(window.frame.height) * Int(scale)
         c.showsCursor = options.showsCursor
         c.capturesAudio = captureSystemAudio
+        if #available(macOS 14.0, *) {
+            c.captureResolution = .best
+            c.preservesAspectRatio = true
+        }
+        c.scalesToFit = false
         if captureSystemAudio {
             c.sampleRate = 48000
             c.channelCount = 2
@@ -89,10 +106,14 @@ enum RecorderConfig {
             if t.value != 0 { return max(1, Int(round(Double(t.timescale) / Double(t.value)))) }
             return options.fps
         }()
-        let defaultBpp: Double = (mode == .hevc_displayP3) ? 0.008 : 0.012
+        // Raise the bitrate density for desktop/screen content.
+        // The previous values were tuned too low for UI/text-heavy recordings and produced visibly
+        // softer edges even after our clarity-boost pass. Keep the same auto-estimation model, but
+        // lift the coefficients so users get clearer recordings without switching to fixed presets.
+        let defaultBpp: Double = (mode == .hevc_displayP3) ? 0.032 : 0.050
         let computed = Int(Double(size.width * size.height * max(1, fps)) * defaultBpp)
         let target = options.targetBitRate ?? computed
-        comp[AVVideoAverageBitRateKey] = max(1_000_000, target)
+        comp[AVVideoAverageBitRateKey] = max(12_000_000, target)
         comp[AVVideoExpectedSourceFrameRateKey] = fps
         comp[AVVideoMaxKeyFrameIntervalDurationKey] = 2
         // 仅 H.264 支持 H264EntropyMode；HEVC 下设置该键会报错（"Compression property H264EntropyMode is not supported for video codec type hvc1"）
