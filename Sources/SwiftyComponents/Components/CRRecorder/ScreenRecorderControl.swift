@@ -882,10 +882,13 @@ public struct ScreenRecorderControl: View {
             exporter.outputURL = target
             exporter.outputFileType = .mov
             exporter.exportAsynchronously {
+                let status = exporter.status
+                let error = exporter.error
+                let outputURL = target
                 DispatchQueue.main.async {
-                    if exporter.status == .completed {
-                        NSWorkspace.shared.activateFileViewerSelecting([target])
-                    } else if let err = exporter.error {
+                    if status == .completed {
+                        NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+                    } else if let err = error {
                         self.errorMessage = err.localizedDescription
                     } else {
                         self.errorMessage = "Export failed"

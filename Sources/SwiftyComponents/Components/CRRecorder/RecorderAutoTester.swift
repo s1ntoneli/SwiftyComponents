@@ -532,6 +532,15 @@ final class RecorderAutoTester: ObservableObject {
                 note += "\n原因: " + rsn
             }
         }
+        if includeScreen, captureSystemAudio {
+            if let syncNote = await analyzeSyncReportIfPossible(
+                result: result,
+                sessionDir: sessionDir,
+                includeMicrophone: wantMic
+            ) {
+                note += "\n" + syncNote
+            }
+        }
         return RunResult(scenario: scenario, index: index, sessionDir: sessionDir, files: checks, passed: allPass, backend: config.backend, note: note, backendParity: nil)
     }
 
@@ -795,6 +804,40 @@ extension RecorderAutoTester {
             }
         }
         return reasons.isEmpty ? nil : reasons.joined(separator: "；")
+    }
+
+    private func analyzeSyncReportIfPossible(
+        result: CRRecorder.Result,
+        sessionDir: URL,
+        includeMicrophone: Bool
+    ) async -> String? {
+        do {
+            let report = try await RecordingSyncAnalyzer.analyze(
+                bundleURL: result.bundleURL,
+                bundleInfo: result.bundleInfo
+            )
+            let reportURL = sessionDir.appendingPathComponent("sync_report.json")
+            try RecordingSyncAnalyzer.writeReport(report, to: reportURL)
+
+            var parts: [String] = ["sync=\(reportURL.lastPathComponent)"]
+            if let screenAV = report.screenAV {
+                let offset = screenAV.offsetP95Ms.map { String(format: "screenAV_p95=%.1fms", $0) }
+                let match = String(format: "screenAV_match=%.0f%%", screenAV.markerMatchRate * 100)
+                if let offset { parts.append(offset) }
+                parts.append(match)
+            }
+            if includeMicrophone, let mic = report.microphoneToScreenAudio {
+                if let offset = mic.offsetP50Ms {
+                    parts.append(String(format: "micToScreen_p50=%.1fms", offset))
+                }
+                parts.append(String(format: "mic_match=%.0f%%", mic.markerMatchRate * 100))
+            }
+            logAutoTest("SYNC_REPORT dir=\(sessionDir.lastPathComponent) path=\(reportURL.lastPathComponent)")
+            return parts.joined(separator: " ")
+        } catch {
+            logAutoTest("SYNC_REPORT_FAILED dir=\(sessionDir.lastPathComponent) error=\(error.localizedDescription)")
+            return "sync=failed \(error.localizedDescription)"
+        }
     }
 }
 

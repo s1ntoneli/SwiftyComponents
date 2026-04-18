@@ -139,11 +139,11 @@ class CRCameraRecording {
     init() {
         print("📹 CRCameraRecording 初始化")
         // 将底层委托事件桥接给外部回调
-        delegate.onError = { [unowned self] error in
-            onError(error)
+        delegate.onError = { [weak self] error in
+            self?.onError(error)
         }
-        delegate.onComplete = { [unowned self] url in
-            onComplete(url)
+        delegate.onComplete = { [weak self] url in
+            self?.onComplete(url)
         }
     }
 
@@ -300,11 +300,14 @@ class CRAppleDeviceRecording {
 
     init() {
         NSLog("📹 CRAppleDeviceRecording 初始化")
-        delegate.onError = { [unowned self] error in onError(error) }
-        delegate.onComplete = { [unowned self] url in
-            endTime = CFAbsoluteTimeGetCurrent()
-            let asset = CRRecorder.BundleInfo.FileAsset(filename: url.lastPathComponent, tyle: .appleDevice, recordingStartTimestamp: startTime, recordingEndTimestamp: endTime)
-            onComplete([asset])
+        delegate.onError = { [weak self] error in
+            self?.onError(error)
+        }
+        delegate.onComplete = { [weak self] url in
+            guard let self else { return }
+            self.endTime = CFAbsoluteTimeGetCurrent()
+            let asset = CRRecorder.BundleInfo.FileAsset(filename: url.lastPathComponent, tyle: .appleDevice, recordingStartTimestamp: self.startTime, recordingEndTimestamp: self.endTime)
+            self.onComplete([asset])
         }
     }
 
@@ -413,10 +416,12 @@ class CRMicrophoneRecording {
 
     init() {
         print("🎤 CRMicrophoneRecording 初始化")
-        delegate.audioLevelHandler = { [unowned self] level, peakLevel in
-            audioLevelHandler?(level, peakLevel)
+        delegate.audioLevelHandler = { [weak self] level, peakLevel in
+            self?.audioLevelHandler?(level, peakLevel)
         }
-        delegate.onError = { [unowned self] err in onError(err) }
+        delegate.onError = { [weak self] err in
+            self?.onError(err)
+        }
     }
 
     func prepare(microphoneID: String) async throws {

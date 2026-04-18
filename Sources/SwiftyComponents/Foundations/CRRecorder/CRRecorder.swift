@@ -187,7 +187,9 @@ public class CRRecorder: @unchecked Sendable {
         try await withThrowingTaskGroup { group  in
             for scheme in auxiliarySchemes {
                 group.addTask {
+                    NSLog("APP_ENTRY_TRACE CRRecorder.startRecording auxiliary begin %@", scheme.id)
                     try await self.startRecord(scheme: scheme)
+                    NSLog("APP_ENTRY_TRACE CRRecorder.startRecording auxiliary returned %@", scheme.id)
                 }
             }
             try await group.waitForAll()
@@ -196,7 +198,9 @@ public class CRRecorder: @unchecked Sendable {
         try await withThrowingTaskGroup { group in
             for scheme in primarySchemes {
                 group.addTask {
+                    NSLog("APP_ENTRY_TRACE CRRecorder.startRecording primary begin %@", scheme.id)
                     try await self.startRecord(scheme: scheme)
+                    NSLog("APP_ENTRY_TRACE CRRecorder.startRecording primary returned %@", scheme.id)
                 }
             }
             try await group.waitForAll()
@@ -296,7 +300,7 @@ public class CRRecorder: @unchecked Sendable {
             }
         case .microphone(microphoneID: let microphoneID, filename: let filename, microphoneOptions: _):
             if let avCapture = microphoneCaptures[microphoneID] {
-                let fileURL = outputDirectory.appendingPathComponent(filename, conformingTo: .mpeg4Audio)
+                let fileURL = outputDirectory.appendingPathComponent(filename).appendingPathExtension("m4a")
                 try await avCapture.start(fileURL: fileURL)
             }
         case .appleDevice(appleDeviceID: let appleDeviceID, filename: let filename, cameraOptions: _):
@@ -391,7 +395,7 @@ public class CRRecorder: @unchecked Sendable {
             return try await recordCamera(cameraId: cameraID, fileURL: fileURL)
         case .microphone(microphoneID: let microphoneID, filename: let filename, microphoneOptions: _):
             print("[CRRecorder] 开始麦克风录制")
-            let fileURL = outputDirectory.appendingPathComponent(filename, conformingTo: .mpeg4Audio)
+            let fileURL = outputDirectory.appendingPathComponent(filename).appendingPathExtension("m4a")
             return try await recordMicrophone(microphoneID: microphoneID, fileURL: fileURL)
         case .appleDevice(appleDeviceID: let appleDeviceID, filename: let filename, cameraOptions: _):
             print("[CRRecorder] 开始苹果设备录制")

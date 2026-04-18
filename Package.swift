@@ -10,17 +10,38 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
-        // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
             name: "SwiftyComponents",
             targets: ["SwiftyComponents"]
         ),
+        .executable(
+            name: "RecordingSyncCaptureTool",
+            targets: ["RecordingSyncCaptureTool"]
+        ),
+        .executable(
+            name: "RecordingSyncTargetApp",
+            targets: ["RecordingSyncTargetApp"]
+        ),
+        .executable(
+            name: "RecordingSyncInspectionTool",
+            targets: ["RecordingSyncInspectionTool"]
+        ),
     ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "SwiftyComponents"
+        ),
+        .executableTarget(
+            name: "RecordingSyncCaptureTool",
+            dependencies: ["SwiftyComponents"]
+        ),
+        .executableTarget(
+            name: "RecordingSyncTargetApp",
+            dependencies: ["SwiftyComponents"]
+        ),
+        .executableTarget(
+            name: "RecordingSyncInspectionTool",
+            dependencies: ["SwiftyComponents"]
         ),
         .testTarget(
             name: "SwiftyComponentsTests",
