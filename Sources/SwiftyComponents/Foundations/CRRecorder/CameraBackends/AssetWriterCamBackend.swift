@@ -1,6 +1,40 @@
 import Foundation
 import AVFoundation
 
+private enum CameraInvestigationLog {
+    static let fileURL = URL(fileURLWithPath: "/tmp/screensage-rec-invest.log")
+
+    static func write(_ message: String) {
+        let line = "\(iso8601Timestamp()) [REC_INVEST][CAM] \(message)\n"
+        NSLog("%@", line.trimmingCharacters(in: .newlines))
+        appendToFile(line)
+    }
+
+    private static func iso8601Timestamp() -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: Date())
+    }
+
+    private static func appendToFile(_ line: String) {
+        let data = Data(line.utf8)
+        let directoryURL = fileURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        if !FileManager.default.fileExists(atPath: fileURL.path) {
+            _ = FileManager.default.createFile(atPath: fileURL.path, contents: data)
+            return
+        }
+        guard let handle = try? FileHandle(forWritingTo: fileURL) else { return }
+        defer { try? handle.close() }
+        do {
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+        } catch {
+            return
+        }
+    }
+}
+
 final class AssetWriterCamBackend: CameraBackend {
     var onFirstPTS: ((CMTime) -> Void)?
     weak var videoFPSSink: ScreenVideoFPSEventSink?
@@ -44,6 +78,10 @@ final class AssetWriterCamBackend: CameraBackend {
     private var expectedVideoDimensions: (width: Int, height: Int)?
     private var expectedVideoDimensionsFirstSampleAt: CFAbsoluteTime?
     private var expectedVideoDimensionsMismatchCount: Int = 0
+    private var consecutiveVideoNotReadyCount: UInt64 = 0
+    private var firstVideoNotReadyWallTime: CFAbsoluteTime?
+    private var lastVideoAppendWallTime: CFAbsoluteTime?
+    private var lastVideoNotReadyLogWallTime: CFAbsoluteTime?
 
     func apply(options: CameraRecordingOptions) { self.options = options }
     private var didSignalError = false
@@ -124,10 +162,14 @@ final class AssetWriterCamBackend: CameraBackend {
             let d = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
             self.expectedVideoDimensions = (width: Int(d.width), height: Int(d.height))
         } else {
-            self.expectedVideoDimensions = nil
+        self.expectedVideoDimensions = nil
         }
         self.expectedVideoDimensionsFirstSampleAt = nil
         self.expectedVideoDimensionsMismatchCount = 0
+        self.consecutiveVideoNotReadyCount = 0
+        self.firstVideoNotReadyWallTime = nil
+        self.lastVideoAppendWallTime = nil
+        self.lastVideoNotReadyLogWallTime = nil
         // 更新诊断中心文件路径，便于外部观察文件大小增长/片段刷新
         RecorderDiagnostics.shared.setOutputFileURL(fileURL)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -190,6 +232,7 @@ final class AssetWriterCamBackend: CameraBackend {
                         cleanupAndResume(.success(()))
                         return
                     }
+                    self.logStopStateIfNeeded()
                     // 在 markAsFinished 前尝试注入一次 keepalive，帮助触发尾段刷新
                     self.appendFinalKeepaliveIfNeeded()
                     self.videoInput?.markAsFinished()
@@ -395,6 +438,7 @@ final class AssetWriterCamBackend: CameraBackend {
                 writer.startSession(atSourceTime: pts)
                 writerSessionStarted = true
                 firstVideoPTS = pts
+                lastVideoAppendWallTime = CFAbsoluteTimeGetCurrent()
                 onFirstPTS?(pts)
                 startContinuation?.resume(returning: ())
                 startContinuation = nil
@@ -407,12 +451,14 @@ final class AssetWriterCamBackend: CameraBackend {
             let ready = input.isReadyForMoreMediaData
             if !ready {
                 videoFPSSink?.onDroppedVideoFrameNotReady()
+                noteVideoNotReady(pts: pts)
                 return
             }
             let ok = input.append(sampleBuffer)
             if ok {
                 lastVideoSample = sampleBuffer
                 lastVideoPTS = sampleBuffer.presentationTimeStamp
+                noteVideoAppendSuccess(pts: pts)
                 videoFPSSink?.onAppendedVideoFrame()
             }
             if let w = writer, (!ok || w.status == .failed) {
@@ -628,6 +674,81 @@ final class AssetWriterCamBackend: CameraBackend {
                 _ = input.append(dup)
             }
         }
+    }
+
+    private func noteVideoNotReady(pts: CMTime) {
+        consecutiveVideoNotReadyCount &+= 1
+        let now = CFAbsoluteTimeGetCurrent()
+        if firstVideoNotReadyWallTime == nil {
+            firstVideoNotReadyWallTime = now
+        }
+
+        let shouldLog: Bool
+        if consecutiveVideoNotReadyCount == 1 || consecutiveVideoNotReadyCount == 60 {
+            shouldLog = true
+        } else if let lastLog = lastVideoNotReadyLogWallTime {
+            shouldLog = (now - lastLog) >= 5
+        } else {
+            shouldLog = true
+        }
+
+        guard shouldLog else { return }
+        lastVideoNotReadyLogWallTime = now
+        let stalledFor = firstVideoNotReadyWallTime.map { now - $0 } ?? 0
+        let sinceLastAppend = lastVideoAppendWallTime.map { now - $0 } ?? -1
+        CameraInvestigationLog.write(
+            "BACKPRESSURE file=\(fileURL?.lastPathComponent ?? "nil") streak=\(consecutiveVideoNotReadyCount) stalledFor=\(String(format: "%.2f", stalledFor))s sinceLastAppend=\(String(format: "%.2f", sinceLastAppend))s pts=\(String(format: "%.3f", pts.seconds)) writer=\(writerStatusDescription()) fileSize=\(currentOutputFileSizeBytes())"
+        )
+    }
+
+    private func noteVideoAppendSuccess(pts: CMTime) {
+        let now = CFAbsoluteTimeGetCurrent()
+        if consecutiveVideoNotReadyCount > 0 {
+            let stalledFor = firstVideoNotReadyWallTime.map { now - $0 } ?? 0
+            CameraInvestigationLog.write(
+                "BACKPRESSURE_RECOVERED file=\(fileURL?.lastPathComponent ?? "nil") streak=\(consecutiveVideoNotReadyCount) stalledFor=\(String(format: "%.2f", stalledFor))s pts=\(String(format: "%.3f", pts.seconds)) writer=\(writerStatusDescription()) fileSize=\(currentOutputFileSizeBytes())"
+            )
+        }
+        consecutiveVideoNotReadyCount = 0
+        firstVideoNotReadyWallTime = nil
+        lastVideoNotReadyLogWallTime = nil
+        lastVideoAppendWallTime = now
+    }
+
+    private func logStopStateIfNeeded() {
+        let now = CFAbsoluteTimeGetCurrent()
+        let sinceLastAppend = lastVideoAppendWallTime.map { now - $0 } ?? -1
+        let stalledFor = firstVideoNotReadyWallTime.map { now - $0 } ?? 0
+        CameraInvestigationLog.write(
+            "STOP_STATE file=\(fileURL?.lastPathComponent ?? "nil") streak=\(consecutiveVideoNotReadyCount) stalledFor=\(String(format: "%.2f", stalledFor))s sinceLastAppend=\(String(format: "%.2f", sinceLastAppend))s lastPTS=\(String(format: "%.3f", lastVideoPTS?.seconds ?? -1)) writer=\(writerStatusDescription()) fileSize=\(currentOutputFileSizeBytes())"
+        )
+    }
+
+    private func writerStatusDescription() -> String {
+        guard let writer else { return "nil" }
+        switch writer.status {
+        case .unknown:
+            return "unknown"
+        case .writing:
+            return "writing"
+        case .completed:
+            return "completed"
+        case .failed:
+            return "failed"
+        case .cancelled:
+            return "cancelled"
+        @unknown default:
+            return "unknown-future"
+        }
+    }
+
+    private func currentOutputFileSizeBytes() -> Int64 {
+        guard let fileURL else { return -1 }
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+           let size = attrs[.size] as? NSNumber {
+            return size.int64Value
+        }
+        return -1
     }
 
     private func detachConfiguredOutputs(from session: AVCaptureSession) {
