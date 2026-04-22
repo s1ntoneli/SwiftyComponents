@@ -89,54 +89,66 @@ public final class SharedCameraPreviewVideoOutputRouter: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [String: VideoEntry] = [:]
     private var desiredMirroringByDeviceID: [String: Bool] = [:]
+    private let configurationQueue = DispatchQueue(
+        label: "com.gokoding.screensage.shared-preview-video-configuration",
+        qos: .userInitiated
+    )
 
     private init() {}
 
-    @MainActor
     @discardableResult
-    public func ensureOutputAttached(cameraID: String) -> Bool {
+    public func ensureOutputAttached(cameraID: String) async -> Bool {
         guard let context = SharedCameraPreviewSessionRegistry.shared.context(for: cameraID) else { return false }
         let deviceID = context.device.uniqueID
 
-        lock.lock()
-        if let entry = entries[deviceID], entry.session === context.session {
-            let desiredMirroring = desiredMirroringByDeviceID[deviceID] ?? false
-            lock.unlock()
-            applyMirroring(desiredMirroring, to: entry.output)
+        if let existing = existingOutputEntry(deviceID: deviceID, session: context.session) {
+            let (output, desiredMirroring) = existing
+            applyMirroring(desiredMirroring, to: output)
             return true
         }
-        lock.unlock()
+        
+        let outputMirroring = currentDesiredMirroring(for: deviceID)
 
-        let output = AVCaptureVideoDataOutput()
-        output.alwaysDiscardsLateVideoFrames = true
-        output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)]
+        return await withCheckedContinuation { continuation in
+            configurationQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: false)
+                    return
+                }
 
-        let forwarder = Forwarder()
-        let queue = DispatchQueue(label: "com.gokoding.screensage.shared-preview-video.\(deviceID)", qos: .userInitiated)
+                let output = AVCaptureVideoDataOutput()
+                output.alwaysDiscardsLateVideoFrames = true
+                output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)]
 
-        context.session.beginConfiguration()
-        guard context.session.canAddOutput(output) else {
-            context.session.commitConfiguration()
-            return false
-        }
-        context.session.addOutput(output)
-        context.session.commitConfiguration()
-        output.setSampleBufferDelegate(forwarder, queue: queue)
-        applyMirroring(currentDesiredMirroring(for: deviceID), to: output)
+                let forwarder = Forwarder()
+                let queue = DispatchQueue(label: "com.gokoding.screensage.shared-preview-video.\(deviceID)", qos: .userInitiated)
 
-        let entry = VideoEntry(session: context.session, deviceID: deviceID, output: output, forwarder: forwarder)
-        forwarder.onSample = { [weak self, weak entry] sampleBuffer in
-            guard let self, let entry else { return }
-            let consumers = self.currentConsumers(for: entry.deviceID)
-            for consumer in consumers {
-                consumer(sampleBuffer)
+                context.session.beginConfiguration()
+                guard context.session.canAddOutput(output) else {
+                    context.session.commitConfiguration()
+                    continuation.resume(returning: false)
+                    return
+                }
+                context.session.addOutput(output)
+                context.session.commitConfiguration()
+                output.setSampleBufferDelegate(forwarder, queue: queue)
+                self.applyMirroring(outputMirroring, to: output)
+
+                let entry = VideoEntry(session: context.session, deviceID: deviceID, output: output, forwarder: forwarder)
+                forwarder.onSample = { [weak self, weak entry] sampleBuffer in
+                    guard let self, let entry else { return }
+                    let consumers = self.currentConsumers(for: entry.deviceID)
+                    for consumer in consumers {
+                        consumer(sampleBuffer)
+                    }
+                }
+
+                self.lock.lock()
+                self.entries[deviceID] = entry
+                self.lock.unlock()
+                continuation.resume(returning: true)
             }
         }
-
-        lock.lock()
-        entries[deviceID] = entry
-        lock.unlock()
-        return true
     }
 
     @MainActor
@@ -187,6 +199,13 @@ public final class SharedCameraPreviewVideoOutputRouter: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return desiredMirroringByDeviceID[deviceID] ?? false
+    }
+
+    private func existingOutputEntry(deviceID: String, session: AVCaptureSession) -> (output: AVCaptureVideoDataOutput, desiredMirroring: Bool)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = entries[deviceID], entry.session === session else { return nil }
+        return (entry.output, desiredMirroringByDeviceID[deviceID] ?? false)
     }
 
     private func applyMirroring(_ isMirrored: Bool, to output: AVCaptureVideoDataOutput) {
